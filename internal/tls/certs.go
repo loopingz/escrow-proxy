@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"fmt"
 	"math/big"
+	"net"
 	"sync"
 	"time"
 )
@@ -59,6 +60,13 @@ func (c *CertCache) GetOrCreate(host string) (*tls.Certificate, error) {
 }
 
 func (c *CertCache) generate(host string) (*tls.Certificate, error) {
+	// Strip port if present (CONNECT requests include it, e.g. "github.com:443")
+	hostname, _, err := net.SplitHostPort(host)
+	if err != nil {
+		// No port present, use as-is
+		hostname = host
+	}
+
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("generating leaf key: %w", err)
@@ -71,12 +79,12 @@ func (c *CertCache) generate(host string) (*tls.Certificate, error) {
 
 	template := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: host},
+		Subject:      pkix.Name{CommonName: hostname},
 		NotBefore:    time.Now().Add(-1 * time.Hour),
 		NotAfter:     time.Now().Add(24 * time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{host},
+		DNSNames:     []string{hostname},
 	}
 
 	raw, err := x509.CreateCertificate(rand.Reader, template, c.ca.Cert, &key.PublicKey, c.ca.Key)

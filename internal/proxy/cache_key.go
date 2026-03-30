@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -32,8 +33,11 @@ func ComputeCacheKey(req *http.Request, selectedHeaders []string) string {
 	h.Write([]byte("\n"))
 
 	if req.Body != nil && req.Body != http.NoBody {
+		bodyBytes, _ := io.ReadAll(req.Body)
+		req.Body.Close()
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		bodyHash := sha256.New()
-		io.Copy(bodyHash, req.Body)
+		bodyHash.Write(bodyBytes)
 		h.Write(bodyHash.Sum(nil))
 	}
 
