@@ -24,6 +24,13 @@ func TestBuildVersion(t *testing.T) {
 			date:    "unknown",
 			want:    "escrow-proxy dev (commit none, built unknown)",
 		},
+		{
+			name:    "empty inputs",
+			version: "",
+			commit:  "",
+			date:    "",
+			want:    "escrow-proxy  (commit , built )",
+		},
 	}
 
 	for _, tc := range tests {
