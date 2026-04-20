@@ -1,0 +1,121 @@
+version: 2
+
+project_name: escrow-proxy
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: escrow-proxy
+    main: ./cmd/escrow-proxy
+    binary: escrow-proxy
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: default
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE*
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+sboms:
+  - id: archive-sbom
+    artifacts: archive
+
+dockers:
+  - id: amd64
+    use: buildx
+    goos: linux
+    goarch: amd64
+    image_templates:
+      - "ghcr.io/loopingz/escrow-proxy:{{ .Version }}-amd64"
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.source=https://github.com/loopingz/escrow-proxy"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+
+  - id: arm64
+    use: buildx
+    goos: linux
+    goarch: arm64
+    image_templates:
+      - "ghcr.io/loopingz/escrow-proxy:{{ .Version }}-arm64"
+    build_flag_templates:
+      - "--platform=linux/arm64"
+      - "--label=org.opencontainers.image.title={{ .ProjectName }}"
+      - "--label=org.opencontainers.image.version={{ .Version }}"
+      - "--label=org.opencontainers.image.revision={{ .FullCommit }}"
+      - "--label=org.opencontainers.image.source=https://github.com/loopingz/escrow-proxy"
+      - "--label=org.opencontainers.image.licenses=Apache-2.0"
+
+docker_manifests:
+  - name_template: "ghcr.io/loopingz/escrow-proxy:{{ .Version }}"
+    image_templates:
+      - "ghcr.io/loopingz/escrow-proxy:{{ .Version }}-amd64"
+      - "ghcr.io/loopingz/escrow-proxy:{{ .Version }}-arm64"
+  - name_template: "ghcr.io/loopingz/escrow-proxy:latest"
+    image_templates:
+      - "ghcr.io/loopingz/escrow-proxy:{{ .Version }}-amd64"
+      - "ghcr.io/loopingz/escrow-proxy:{{ .Version }}-arm64"
+
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - "sign-blob"
+      - "--yes"
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+    artifacts: checksum
+    output: true
+
+docker_signs:
+  - cmd: cosign
+    args:
+      - "sign"
+      - "--yes"
+      - "${artifact}@${digest}"
+    artifacts: manifests
+    output: true
+
+release:
+  github:
+    owner: loopingz
+    name: escrow-proxy
+  draft: false
+  prerelease: auto
+
+changelog:
+  disable: true
