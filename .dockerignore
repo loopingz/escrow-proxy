@@ -1,0 +1,7 @@
+.git
+.github
+.worktrees
+dist
+docs
+*.md
+*_test.go
