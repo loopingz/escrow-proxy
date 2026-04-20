@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/loopingz/escrow-proxy/compare/v0.2.0...v0.2.1) (2026-04-20)
+
+
+### Bug Fixes
+
+* **ci:** chain goreleaser in release-please workflow via conditional job ([0c3f4ed](https://github.com/loopingz/escrow-proxy/commit/0c3f4edf1be13ada3110ef0f015bf8d71eb9da9d))
+
 ## [0.2.0](https://github.com/loopingz/escrow-proxy/compare/v0.1.0...v0.2.0) (2026-04-20)
 
 
