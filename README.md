@@ -61,6 +61,18 @@ cosign verify-blob \
 sha256sum -c checksums.txt --ignore-missing
 ```
 
+SBOMs are attached per-archive and signed the same way:
+
+```bash
+# Replace <archive> with the archive filename, e.g. escrow-proxy_0.1.0_linux_amd64.tar.gz
+cosign verify-blob \
+  --certificate <archive>.sbom.json.pem \
+  --signature <archive>.sbom.json.sig \
+  --certificate-identity-regexp "^https://github.com/loopingz/escrow-proxy/.github/workflows/release.yml@.*" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  <archive>.sbom.json
+```
+
 ## Quick Start
 
 ### 1. Start the proxy
