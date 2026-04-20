@@ -89,7 +89,8 @@ docker_manifests:
       - "ghcr.io/loopingz/escrow-proxy:{{ .Version }}-arm64"
 
 signs:
-  - cmd: cosign
+  - id: checksum-sign
+    cmd: cosign
     signature: "${artifact}.sig"
     certificate: "${artifact}.pem"
     args:
@@ -99,6 +100,18 @@ signs:
       - "--output-certificate=${certificate}"
       - "${artifact}"
     artifacts: checksum
+    output: true
+  - id: sbom-sign
+    cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - "sign-blob"
+      - "--yes"
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+    artifacts: sbom
     output: true
 
 docker_signs:
