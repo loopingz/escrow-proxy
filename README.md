@@ -23,6 +23,44 @@ cd escrow-proxy
 go build -o escrow-proxy ./cmd/escrow-proxy
 ```
 
+### Container image
+
+Multi-arch (`linux/amd64`, `linux/arm64`) images are published to GHCR on every release:
+
+```bash
+docker pull ghcr.io/loopingz/escrow-proxy:latest
+# or pin to a version
+docker pull ghcr.io/loopingz/escrow-proxy:0.1.0
+```
+
+### Verifying release artifacts
+
+Release binaries and container images are signed with [cosign](https://docs.sigstore.dev/) using keyless OIDC signing via GitHub Actions.
+
+Verify a container image:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp "^https://github.com/loopingz/escrow-proxy/.github/workflows/release.yml@.*" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/loopingz/escrow-proxy:0.1.0
+```
+
+Verify the checksum file for a binary release:
+
+```bash
+# Download from https://github.com/loopingz/escrow-proxy/releases
+cosign verify-blob \
+  --certificate checksums.txt.pem \
+  --signature checksums.txt.sig \
+  --certificate-identity-regexp "^https://github.com/loopingz/escrow-proxy/.github/workflows/release.yml@.*" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+
+# Then check the binary's SHA against checksums.txt
+sha256sum -c checksums.txt --ignore-missing
+```
+
 ## Quick Start
 
 ### 1. Start the proxy
