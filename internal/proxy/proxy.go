@@ -3,6 +3,7 @@ package proxy
 import (
 	"crypto/tls"
 	"log/slog"
+	"regexp"
 	"time"
 
 	"github.com/elazarl/goproxy"
@@ -24,6 +25,8 @@ type Config struct {
 	CertCache       *tlspkg.CertCache
 	CA              *tlspkg.CA
 	KeyHeaders      []string
+	Methods         []string
+	ExcludePatterns []*regexp.Regexp
 	UpstreamTimeout time.Duration
 	Logger          *slog.Logger
 	AllowFallback   bool
@@ -52,12 +55,19 @@ func New(cfg *Config) *goproxy.ProxyHttpServer {
 		},
 	))
 
+	methods := make(map[string]bool, len(cfg.Methods))
+	for _, m := range cfg.Methods {
+		methods[m] = true
+	}
+
 	handler := &Handler{
-		cache:      cfg.Cache,
-		keyHeaders: cfg.KeyHeaders,
-		mode:       cfg.Mode,
-		logger:     cfg.Logger,
-		timeout:    cfg.UpstreamTimeout,
+		cache:           cfg.Cache,
+		keyHeaders:      cfg.KeyHeaders,
+		methods:         methods,
+		excludePatterns: cfg.ExcludePatterns,
+		mode:            cfg.Mode,
+		logger:          cfg.Logger,
+		timeout:         cfg.UpstreamTimeout,
 	}
 
 	proxy.OnRequest().DoFunc(handler.HandleRequest)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -26,7 +27,9 @@ type CAConfig struct {
 }
 
 type CacheConfig struct {
-	KeyHeaders []string `yaml:"key_headers"`
+	KeyHeaders      []string `yaml:"key_headers"`
+	Methods         []string `yaml:"methods"`
+	ExcludePatterns []string `yaml:"exclude_patterns"`
 }
 
 type StorageConfig struct {
@@ -60,6 +63,7 @@ func DefaultConfig() *Config {
 		UpstreamTimeout: 30 * time.Second,
 		Cache: CacheConfig{
 			KeyHeaders: []string{"Accept", "Accept-Encoding"},
+			Methods:    []string{"GET", "HEAD"},
 		},
 		Storage: StorageConfig{
 			Tiers: []StorageTierConfig{
@@ -83,6 +87,11 @@ func Load(path string) (*Config, error) {
 	}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing config file: %w", err)
+	}
+	for _, p := range cfg.Cache.ExcludePatterns {
+		if _, err := regexp.Compile(p); err != nil {
+			return nil, fmt.Errorf("invalid cache.exclude_patterns entry %q: %w", p, err)
+		}
 	}
 	return cfg, nil
 }

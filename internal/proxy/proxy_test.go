@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/loopingz/escrow-proxy/internal/archive"
@@ -374,6 +376,132 @@ func TestProxy_DoesNotCache4xx(t *testing.T) {
 
 	if callCount != 2 {
 		t.Fatalf("expected 2 upstream calls (4xx not cached), got %d", callCount)
+	}
+}
+
+func TestProxy_BypassesNonAllowedMethods(t *testing.T) {
+	callCount := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Write([]byte("posted"))
+	}))
+	defer upstream.Close()
+
+	ca, err := tlspkg.GenerateCA()
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	certCache := tlspkg.NewCertCache(ca, 100)
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+
+	p := proxy.New(&proxy.Config{
+		Mode:       proxy.ModeServe,
+		Cache:      c,
+		CertCache:  certCache,
+		CA:         ca,
+		KeyHeaders: []string{},
+		Methods:    []string{"GET", "HEAD"},
+		Logger:     testLogger(),
+	})
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+
+	// Two POSTs — both must hit upstream (not cached)
+	for i := 0; i < 2; i++ {
+		req, _ := http.NewRequest("POST", upstream.URL+"/api", strings.NewReader("body"))
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("post %d: %v", i, err)
+		}
+		io.ReadAll(resp.Body)
+		resp.Body.Close()
+	}
+	if callCount != 2 {
+		t.Fatalf("expected 2 upstream POST calls (not cached), got %d", callCount)
+	}
+}
+
+func TestProxy_BypassesExcludedURL(t *testing.T) {
+	callCount := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		w.Write([]byte("token"))
+	}))
+	defer upstream.Close()
+
+	ca, err := tlspkg.GenerateCA()
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	certCache := tlspkg.NewCertCache(ca, 100)
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+
+	p := proxy.New(&proxy.Config{
+		Mode:            proxy.ModeServe,
+		Cache:           c,
+		CertCache:       certCache,
+		CA:              ca,
+		KeyHeaders:      []string{},
+		Methods:         []string{"GET", "HEAD"},
+		ExcludePatterns: []*regexp.Regexp{regexp.MustCompile(`/token$`)},
+		Logger:          testLogger(),
+	})
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+
+	for i := 0; i < 2; i++ {
+		resp, err := client.Get(upstream.URL + "/token")
+		if err != nil {
+			t.Fatalf("get %d: %v", i, err)
+		}
+		io.ReadAll(resp.Body)
+		resp.Body.Close()
+	}
+	if callCount != 2 {
+		t.Fatalf("expected 2 upstream calls (excluded URL), got %d", callCount)
+	}
+}
+
+func TestProxy_OfflineMode_BypassedMethodReturns502(t *testing.T) {
+	ca, err := tlspkg.GenerateCA()
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+	certCache := tlspkg.NewCertCache(ca, 100)
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+
+	p := proxy.New(&proxy.Config{
+		Mode:       proxy.ModeOffline,
+		Cache:      c,
+		CertCache:  certCache,
+		CA:         ca,
+		KeyHeaders: []string{},
+		Methods:    []string{"GET", "HEAD"},
+		Logger:     testLogger(),
+	})
+	proxyServer := httptest.NewServer(p)
+	defer proxyServer.Close()
+
+	proxyURL, _ := url.Parse(proxyServer.URL)
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+
+	req, _ := http.NewRequest("POST", "http://example.com/api", strings.NewReader("b"))
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected 502 for bypassed method in offline, got %d", resp.StatusCode)
 	}
 }
 
