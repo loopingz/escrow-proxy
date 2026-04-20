@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -152,6 +153,20 @@ func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 	return cfg, nil
 }
 
+// compileExcludes turns the configured regex strings into compiled patterns.
+// Load() already validated them, so compilation should not fail.
+func compileExcludes(patterns []string) ([]*regexp.Regexp, error) {
+	out := make([]*regexp.Regexp, 0, len(patterns))
+	for _, p := range patterns {
+		re, err := regexp.Compile(p)
+		if err != nil {
+			return nil, fmt.Errorf("compile exclude pattern %q: %w", p, err)
+		}
+		out = append(out, re)
+	}
+	return out, nil
+}
+
 // buildStorage creates a storage.Storage from the config tiers.
 func buildStorage(cfg *config.Config) (storage.Storage, error) {
 	ctx := context.Background()
@@ -270,12 +285,19 @@ func newServeCmd() *cobra.Command {
 			c := cache.New(store)
 			certCache := tlspkg.NewCertCache(ca, 1000)
 
+			excludes, err := compileExcludes(cfg.Cache.ExcludePatterns)
+			if err != nil {
+				return err
+			}
+
 			handler := proxy.New(&proxy.Config{
 				Mode:            proxy.ModeServe,
 				Cache:           c,
 				CertCache:       certCache,
 				CA:              ca,
 				KeyHeaders:      cfg.Cache.KeyHeaders,
+				Methods:         cfg.Cache.Methods,
+				ExcludePatterns: excludes,
 				UpstreamTimeout: cfg.UpstreamTimeout,
 				Logger:          logger,
 			})
@@ -338,12 +360,19 @@ func newRecordCmd() *cobra.Command {
 			c := rec.Cache()
 			certCache := tlspkg.NewCertCache(ca, 1000)
 
+			excludes, err := compileExcludes(cfg.Cache.ExcludePatterns)
+			if err != nil {
+				return err
+			}
+
 			handler := proxy.New(&proxy.Config{
 				Mode:            proxy.ModeRecord,
 				Cache:           c,
 				CertCache:       certCache,
 				CA:              ca,
 				KeyHeaders:      cfg.Cache.KeyHeaders,
+				Methods:         cfg.Cache.Methods,
+				ExcludePatterns: excludes,
 				UpstreamTimeout: cfg.UpstreamTimeout,
 				Logger:          logger,
 			})
@@ -422,12 +451,19 @@ func newOfflineCmd() *cobra.Command {
 				mode = proxy.ModeServe
 			}
 
+			excludes, err := compileExcludes(cfg.Cache.ExcludePatterns)
+			if err != nil {
+				return err
+			}
+
 			handler := proxy.New(&proxy.Config{
 				Mode:            mode,
 				Cache:           c,
 				CertCache:       certCache,
 				CA:              ca,
 				KeyHeaders:      cfg.Cache.KeyHeaders,
+				Methods:         cfg.Cache.Methods,
+				ExcludePatterns: excludes,
 				UpstreamTimeout: cfg.UpstreamTimeout,
 				Logger:          logger,
 				AllowFallback:   cfg.Offline.AllowFallback,

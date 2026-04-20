@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/elazarl/goproxy"
@@ -13,14 +14,38 @@ import (
 )
 
 type Handler struct {
-	cache      *cache.Cache
-	keyHeaders []string
-	mode       Mode
-	logger     *slog.Logger
-	timeout    time.Duration
+	cache           *cache.Cache
+	keyHeaders      []string
+	methods         map[string]bool
+	excludePatterns []*regexp.Regexp
+	mode            Mode
+	logger          *slog.Logger
+	timeout         time.Duration
+}
+
+func (h *Handler) bypass(req *http.Request) (bool, string) {
+	if len(h.methods) > 0 && !h.methods[req.Method] {
+		return true, "method"
+	}
+	url := req.URL.String()
+	for _, re := range h.excludePatterns {
+		if re.MatchString(url) {
+			return true, "exclude_pattern"
+		}
+	}
+	return false, ""
 }
 
 func (h *Handler) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+	if bypass, reason := h.bypass(req); bypass {
+		h.logger.Debug("bypass cache", "reason", reason, "method", req.Method, "url", req.URL.String())
+		if h.mode == ModeOffline {
+			return req, goproxy.NewResponse(req, "text/plain", http.StatusBadGateway,
+				"escrow-proxy: request bypasses cache ("+reason+") and offline mode forbids upstream")
+		}
+		return req, nil
+	}
+
 	key := ComputeCacheKey(req, h.keyHeaders)
 	ctx.UserData = key
 

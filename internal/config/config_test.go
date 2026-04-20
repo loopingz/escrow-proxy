@@ -19,8 +19,59 @@ func TestDefaultConfig(t *testing.T) {
 	if len(cfg.Cache.KeyHeaders) != 2 {
 		t.Fatalf("KeyHeaders: got %d, want 2", len(cfg.Cache.KeyHeaders))
 	}
+	wantMethods := map[string]bool{"GET": true, "HEAD": true}
+	if len(cfg.Cache.Methods) != len(wantMethods) {
+		t.Fatalf("Methods: got %v, want GET,HEAD", cfg.Cache.Methods)
+	}
+	for _, m := range cfg.Cache.Methods {
+		if !wantMethods[m] {
+			t.Fatalf("Methods: unexpected %q", m)
+		}
+	}
+	if len(cfg.Cache.ExcludePatterns) != 0 {
+		t.Fatalf("ExcludePatterns default: got %v, want empty", cfg.Cache.ExcludePatterns)
+	}
 	if cfg.Record.OCIEntriesPerLayer != 1000 {
 		t.Fatalf("OCIEntriesPerLayer: got %d, want 1000", cfg.Record.OCIEntriesPerLayer)
+	}
+}
+
+func TestLoad_CacheMethodsAndExcludePatterns(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `
+cache:
+  methods: ["GET", "POST"]
+  exclude_patterns:
+    - '^https://example\.com/login$'
+    - '/healthz$'
+`
+	os.WriteFile(cfgPath, []byte(content), 0o644)
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Cache.Methods) != 2 || cfg.Cache.Methods[0] != "GET" || cfg.Cache.Methods[1] != "POST" {
+		t.Fatalf("Methods: got %v", cfg.Cache.Methods)
+	}
+	if len(cfg.Cache.ExcludePatterns) != 2 {
+		t.Fatalf("ExcludePatterns: got %v", cfg.Cache.ExcludePatterns)
+	}
+}
+
+func TestLoad_InvalidExcludePattern(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `
+cache:
+  exclude_patterns:
+    - '[invalid('
+`
+	os.WriteFile(cfgPath, []byte(content), 0o644)
+
+	if _, err := config.Load(cfgPath); err == nil {
+		t.Fatal("expected error for invalid regex, got nil")
 	}
 }
 
