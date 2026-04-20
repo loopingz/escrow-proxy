@@ -21,11 +21,21 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Build-time metadata populated via ldflags by GoReleaser. Defaults keep
+// `go run` and local `go build` usable without any flags.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "escrow-proxy",
-		Short: "MITM caching proxy for CI/CD dependency caching",
+		Use:     "escrow-proxy",
+		Short:   "MITM caching proxy for CI/CD dependency caching",
+		Version: buildVersion(version, commit, date),
 	}
+	rootCmd.SetVersionTemplate("{{.Version}}\n")
 
 	rootCmd.PersistentFlags().String("config", "", "path to config file (YAML)")
 	rootCmd.PersistentFlags().StringP("listen", "l", ":8080", "bind address")
