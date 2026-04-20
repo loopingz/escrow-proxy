@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/loopingz/escrow-proxy/compare/v0.2.1...v0.3.0) (2026-04-20)
+
+
+### Features
+
+* **cache:** restrict caching to GET/HEAD by default and add URL excludes ([#3](https://github.com/loopingz/escrow-proxy/issues/3)) ([0e3c609](https://github.com/loopingz/escrow-proxy/commit/0e3c60997b46e023e787fbbab5b674f6fcb5e8c6))
+
 ## [0.2.1](https://github.com/loopingz/escrow-proxy/compare/v0.2.0...v0.2.1) (2026-04-20)
 
 
