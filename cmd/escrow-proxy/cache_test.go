@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -315,5 +316,15 @@ func TestInvalidate_DryRun_Key_PrintsExactlyOne(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "would delete 1 entries") {
 		t.Fatalf("expected 'would delete 1 entries', got %q", stderr)
+	}
+}
+
+func TestCacheInvalidate_HelpExits0(t *testing.T) {
+	cmd := newCacheCmd()
+	cmd.SetArgs([]string{"invalidate", "--help"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("--help should exit 0, got %v", err)
 	}
 }

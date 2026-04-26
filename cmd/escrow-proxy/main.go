@@ -57,6 +57,7 @@ func main() {
 	rootCmd.AddCommand(newRecordCmd())
 	rootCmd.AddCommand(newOfflineCmd())
 	rootCmd.AddCommand(newCACmd())
+	rootCmd.AddCommand(newCacheCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

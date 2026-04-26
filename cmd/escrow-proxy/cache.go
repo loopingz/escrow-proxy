@@ -9,6 +9,7 @@ import (
 
 	"github.com/loopingz/escrow-proxy/internal/cache"
 	"github.com/loopingz/escrow-proxy/internal/storage"
+	"github.com/spf13/cobra"
 )
 
 // invalidateOptions carries everything runInvalidate needs.
@@ -147,4 +148,62 @@ func validateInvalidateFilters(opts invalidateOptions) error {
 		return fmt.Errorf("--method cannot be combined with --all")
 	}
 	return nil
+}
+
+func newCacheCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "cache",
+		Short: "Cache management commands",
+	}
+	cmd.AddCommand(newCacheInvalidateCmd())
+	return cmd
+}
+
+func newCacheInvalidateCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "invalidate",
+		Short: "Delete cache entries by key, URL, URL prefix, or all",
+		Long: `Delete cache entries from every configured storage tier.
+
+Exactly one of --key, --url, --url-prefix, --all must be supplied.
+--method narrows --url and --url-prefix to a specific HTTP method.
+--dry-run reports what would be deleted without touching storage.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(cmd)
+			if err != nil {
+				return err
+			}
+			store, err := buildStorage(cfg)
+			if err != nil {
+				return err
+			}
+			c := cache.New(store)
+
+			key, _ := cmd.Flags().GetString("key")
+			url, _ := cmd.Flags().GetString("url")
+			urlPrefix, _ := cmd.Flags().GetString("url-prefix")
+			all, _ := cmd.Flags().GetBool("all")
+			method, _ := cmd.Flags().GetString("method")
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+			return runInvalidate(cmd.Context(), invalidateOptions{
+				Cache:     c,
+				Key:       key,
+				URL:       url,
+				URLPrefix: urlPrefix,
+				All:       all,
+				Method:    method,
+				DryRun:    dryRun,
+				Stdout:    cmd.OutOrStdout(),
+				Stderr:    cmd.ErrOrStderr(),
+			})
+		},
+	}
+	cmd.Flags().String("key", "", "exact cache key (hex SHA256)")
+	cmd.Flags().String("url", "", "exact request URL")
+	cmd.Flags().String("url-prefix", "", "request URL prefix")
+	cmd.Flags().Bool("all", false, "delete every entry")
+	cmd.Flags().String("method", "", "narrow --url/--url-prefix to a specific HTTP method")
+	cmd.Flags().Bool("dry-run", false, "print what would be deleted without deleting")
+	return cmd
 }
