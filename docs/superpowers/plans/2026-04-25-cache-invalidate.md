@@ -411,10 +411,9 @@ import (
 
 // newTestCache returns a Cache backed by a fresh tempdir local store
 // and a helper to seed entries.
-func newTestCache(t *testing.T) (*cache.Cache, storage.Storage, func(key, method, url string)) {
+func newTestCache(t *testing.T) (*cache.Cache, func(key, method, url string)) {
 	t.Helper()
-	s := storage.NewLocal(t.TempDir())
-	c := cache.New(s)
+	c := cache.New(storage.NewLocal(t.TempDir()))
 	put := func(key, method, url string) {
 		t.Helper()
 		meta := &cache.EntryMeta{
@@ -427,7 +426,7 @@ func newTestCache(t *testing.T) (*cache.Cache, storage.Storage, func(key, method
 			t.Fatalf("seed Put(%s): %v", key, err)
 		}
 	}
-	return c, s, put
+	return c, put
 }
 
 func runOpts(c *cache.Cache, mutate func(*invalidateOptions)) (string, string, error) {
@@ -445,7 +444,7 @@ func runOpts(c *cache.Cache, mutate func(*invalidateOptions)) (string, string, e
 }
 
 func TestInvalidate_ZeroFilters(t *testing.T) {
-	c, _, _ := newTestCache(t)
+	c, _ := newTestCache(t)
 	_, _, err := runOpts(c, nil)
 	if err == nil || !strings.Contains(err.Error(), "exactly one of") {
 		t.Fatalf("expected 'exactly one of' error, got %v", err)
@@ -453,7 +452,7 @@ func TestInvalidate_ZeroFilters(t *testing.T) {
 }
 
 func TestInvalidate_MultipleFilters(t *testing.T) {
-	c, _, _ := newTestCache(t)
+	c, _ := newTestCache(t)
 	_, _, err := runOpts(c, func(o *invalidateOptions) {
 		o.Key = "abc"
 		o.All = true
@@ -464,7 +463,7 @@ func TestInvalidate_MultipleFilters(t *testing.T) {
 }
 
 func TestInvalidate_AllWithMethodRejected(t *testing.T) {
-	c, _, _ := newTestCache(t)
+	c, _ := newTestCache(t)
 	_, _, err := runOpts(c, func(o *invalidateOptions) {
 		o.All = true
 		o.Method = "GET"
@@ -504,7 +503,7 @@ Append to `cmd/escrow-proxy/cache_test.go`:
 
 ```go
 func TestInvalidate_Key_DeletesSingleEntry(t *testing.T) {
-	c, s, put := newTestCache(t)
+	c, put := newTestCache(t)
 	put("k1", "GET", "https://example.com/a")
 	put("k2", "GET", "https://example.com/b")
 
@@ -531,11 +530,10 @@ func TestInvalidate_Key_DeletesSingleEntry(t *testing.T) {
 	if !strings.Contains(stderr, "deleted 1 entries") {
 		t.Fatalf("expected stderr summary, got %q", stderr)
 	}
-	_ = s
 }
 
 func TestInvalidate_Key_MissingReturnsError(t *testing.T) {
-	c, _, _ := newTestCache(t)
+	c, _ := newTestCache(t)
 	_, _, err := runOpts(c, func(o *invalidateOptions) { o.Key = "ghost" })
 	if err == nil {
 		t.Fatal("expected error for missing key")
@@ -646,7 +644,7 @@ Append to `cmd/escrow-proxy/cache_test.go`:
 
 ```go
 func TestInvalidate_URL_DeletesAllVariations(t *testing.T) {
-	c, _, put := newTestCache(t)
+	c, put := newTestCache(t)
 	put("get", "GET", "https://example.com/x")
 	put("post", "POST", "https://example.com/x")
 	put("other", "GET", "https://example.com/y")
@@ -679,7 +677,7 @@ func TestInvalidate_URL_DeletesAllVariations(t *testing.T) {
 }
 
 func TestInvalidate_URL_WithMethodNarrows(t *testing.T) {
-	c, _, put := newTestCache(t)
+	c, put := newTestCache(t)
 	put("get", "GET", "https://example.com/x")
 	put("post", "POST", "https://example.com/x")
 
@@ -706,7 +704,7 @@ func TestInvalidate_URL_WithMethodNarrows(t *testing.T) {
 }
 
 func TestInvalidate_URL_NoMatches(t *testing.T) {
-	c, _, put := newTestCache(t)
+	c, put := newTestCache(t)
 	put("k1", "GET", "https://example.com/x")
 
 	_, stderr, err := runOpts(c, func(o *invalidateOptions) {
@@ -798,7 +796,7 @@ Append to `cmd/escrow-proxy/cache_test.go`:
 
 ```go
 func TestInvalidate_URLPrefix_DeletesMatching(t *testing.T) {
-	c, _, put := newTestCache(t)
+	c, put := newTestCache(t)
 	put("a", "GET", "https://npmjs.org/pkg/foo")
 	put("b", "GET", "https://npmjs.org/pkg/bar")
 	put("c", "GET", "https://pypi.org/simple/baz")
@@ -826,7 +824,7 @@ func TestInvalidate_URLPrefix_DeletesMatching(t *testing.T) {
 }
 
 func TestInvalidate_URLPrefix_WithMethodNarrows(t *testing.T) {
-	c, _, put := newTestCache(t)
+	c, put := newTestCache(t)
 	put("get1", "GET", "https://npmjs.org/pkg/foo")
 	put("post1", "POST", "https://npmjs.org/pkg/foo")
 	put("get2", "GET", "https://npmjs.org/pkg/bar")
@@ -893,7 +891,7 @@ Append to `cmd/escrow-proxy/cache_test.go`:
 
 ```go
 func TestInvalidate_All_DeletesEverything(t *testing.T) {
-	c, _, put := newTestCache(t)
+	c, put := newTestCache(t)
 	put("a", "GET", "https://example.com/a")
 	put("b", "POST", "https://example.com/b")
 	put("c", "GET", "https://other.test/c")
@@ -983,7 +981,7 @@ Append to `cmd/escrow-proxy/cache_test.go`:
 
 ```go
 func TestInvalidate_DryRun_All_PrintsButLeavesStorage(t *testing.T) {
-	c, _, put := newTestCache(t)
+	c, put := newTestCache(t)
 	put("a", "GET", "https://example.com/a")
 	put("b", "GET", "https://example.com/b")
 
@@ -1012,7 +1010,7 @@ func TestInvalidate_DryRun_All_PrintsButLeavesStorage(t *testing.T) {
 }
 
 func TestInvalidate_DryRun_Key_PrintsExactlyOne(t *testing.T) {
-	c, _, put := newTestCache(t)
+	c, put := newTestCache(t)
 	put("k1", "GET", "https://example.com/a")
 	put("k2", "GET", "https://example.com/b")
 
