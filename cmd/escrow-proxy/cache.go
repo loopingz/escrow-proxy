@@ -72,8 +72,11 @@ func collectTargets(ctx context.Context, opts invalidateOptions) ([]invalidateTa
 			}
 			return strings.HasPrefix(meta.URL, opts.URLPrefix)
 		})
+	case opts.All:
+		return scanTargets(ctx, opts.Cache, func(*cache.EntryMeta) bool { return true })
 	}
-	return nil, errors.New("not implemented") // filled in by later tasks
+	// unreachable: validateInvalidateFilters guarantees exactly one filter is set.
+	return nil, errors.New("no filter matched")
 }
 
 func scanTargets(ctx context.Context, c *cache.Cache, match func(*cache.EntryMeta) bool) ([]invalidateTarget, error) {

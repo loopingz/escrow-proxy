@@ -242,3 +242,25 @@ func TestInvalidate_URLPrefix_WithMethodNarrows(t *testing.T) {
 		t.Fatalf("expected 'deleted 2 entries', got %q", stderr)
 	}
 }
+
+func TestInvalidate_All_DeletesEverything(t *testing.T) {
+	c, put := newTestCache(t)
+	put("a", "GET", "https://example.com/a")
+	put("b", "POST", "https://example.com/b")
+	put("c", "GET", "https://other.test/c")
+
+	_, stderr, err := runOpts(c, func(o *invalidateOptions) { o.All = true })
+	if err != nil {
+		t.Fatalf("runInvalidate: %v", err)
+	}
+
+	for _, k := range []string{"a", "b", "c"} {
+		exists, _ := c.Exists(context.Background(), k)
+		if exists {
+			t.Fatalf("%s should be gone", k)
+		}
+	}
+	if !strings.Contains(stderr, "deleted 3 entries") {
+		t.Fatalf("expected 'deleted 3 entries', got %q", stderr)
+	}
+}
