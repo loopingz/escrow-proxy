@@ -3,6 +3,7 @@ package cache_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"testing"
@@ -75,5 +76,58 @@ func TestCache_Exists(t *testing.T) {
 	exists, _ = c.Exists(ctx, "present")
 	if !exists {
 		t.Fatal("expected true")
+	}
+}
+
+func TestCache_Delete_RemovesMetaAndBody(t *testing.T) {
+	s := storage.NewLocal(t.TempDir())
+	c := cache.New(s)
+	ctx := context.Background()
+
+	meta := &cache.EntryMeta{Method: "GET", URL: "https://example.com/x", StatusCode: 200}
+	if err := c.Put(ctx, "k1", meta, bytes.NewReader([]byte("body"))); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	if err := c.Delete(ctx, "k1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	exists, _ := c.Exists(ctx, "k1")
+	if exists {
+		t.Fatal("expected entry gone after Delete")
+	}
+	bodyExists, _ := s.Exists(ctx, "k1.body")
+	if bodyExists {
+		t.Fatal("expected body gone after Delete")
+	}
+}
+
+func TestCache_Delete_MissingKeyReturnsErrNotFound(t *testing.T) {
+	s := storage.NewLocal(t.TempDir())
+	c := cache.New(s)
+
+	err := c.Delete(context.Background(), "nope")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestCache_Delete_BodyPresentMetaAbsent_ReturnsErrNotFound(t *testing.T) {
+	s := storage.NewLocal(t.TempDir())
+	c := cache.New(s)
+	ctx := context.Background()
+
+	// Inject only the body; meta is the source of truth for existence.
+	if err := s.Put(ctx, "k1.body", bytes.NewReader([]byte("orphan"))); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	err := c.Delete(ctx, "k1")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }

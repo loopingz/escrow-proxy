@@ -64,3 +64,20 @@ func (c *Cache) Get(ctx context.Context, key string) (*EntryMeta, io.ReadCloser,
 func (c *Cache) Exists(ctx context.Context, key string) (bool, error) {
 	return c.storage.Exists(ctx, metaKey(key))
 }
+
+func (c *Cache) Delete(ctx context.Context, key string) error {
+	exists, err := c.storage.Exists(ctx, metaKey(key))
+	if err != nil {
+		return fmt.Errorf("checking meta: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("%w: %s", storage.ErrNotFound, key)
+	}
+	if err := c.storage.Delete(ctx, metaKey(key)); err != nil {
+		return fmt.Errorf("deleting meta: %w", err)
+	}
+	if err := c.storage.Delete(ctx, bodyKey(key)); err != nil {
+		return fmt.Errorf("deleting body: %w", err)
+	}
+	return nil
+}
