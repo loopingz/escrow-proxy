@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"io"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -76,5 +76,44 @@ func TestInvalidate_AllWithMethodRejected(t *testing.T) {
 	}
 }
 
-// silence unused-import warnings in early tasks
-var _ = io.Discard
+
+func TestInvalidate_Key_DeletesSingleEntry(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/a")
+	put("k2", "GET", "https://example.com/b")
+
+	stdout, stderr, err := runOpts(c, func(o *invalidateOptions) { o.Key = "k1" })
+	if err != nil {
+		t.Fatalf("runInvalidate: %v", err)
+	}
+
+	exists, _ := c.Exists(context.Background(), "k1")
+	if exists {
+		t.Fatal("k1 should be gone")
+	}
+	exists, _ = c.Exists(context.Background(), "k2")
+	if !exists {
+		t.Fatal("k2 should remain")
+	}
+
+	if !strings.Contains(stdout, "k1") {
+		t.Fatalf("expected stdout to mention k1, got %q", stdout)
+	}
+	if !strings.Contains(stdout, "https://example.com/a") {
+		t.Fatalf("expected stdout to mention url, got %q", stdout)
+	}
+	if !strings.Contains(stderr, "deleted 1 entries") {
+		t.Fatalf("expected stderr summary, got %q", stderr)
+	}
+}
+
+func TestInvalidate_Key_MissingReturnsError(t *testing.T) {
+	c, _ := newTestCache(t)
+	_, _, err := runOpts(c, func(o *invalidateOptions) { o.Key = "ghost" })
+	if err == nil {
+		t.Fatal("expected error for missing key")
+	}
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound wrap, got %v", err)
+	}
+}

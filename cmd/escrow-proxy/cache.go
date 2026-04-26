@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/loopingz/escrow-proxy/internal/cache"
+	"github.com/loopingz/escrow-proxy/internal/storage"
 )
 
 // invalidateOptions carries everything runInvalidate needs.
@@ -33,7 +34,59 @@ func runInvalidate(ctx context.Context, opts invalidateOptions) error {
 	if err := validateInvalidateFilters(opts); err != nil {
 		return err
 	}
-	return errors.New("not implemented")
+
+	targets, err := collectTargets(ctx, opts)
+	if err != nil {
+		return err
+	}
+	return executeDeletes(ctx, opts, targets)
+}
+
+type invalidateTarget struct {
+	Key    string
+	Method string
+	URL    string
+}
+
+func collectTargets(ctx context.Context, opts invalidateOptions) ([]invalidateTarget, error) {
+	switch {
+	case opts.Key != "":
+		meta, body, err := opts.Cache.Get(ctx, opts.Key)
+		if err != nil {
+			return nil, fmt.Errorf("locating entry: %w", err)
+		}
+		body.Close()
+		return []invalidateTarget{{Key: opts.Key, Method: meta.Method, URL: meta.URL}}, nil
+	}
+	return nil, errors.New("not implemented") // filled in by later tasks
+}
+
+func executeDeletes(ctx context.Context, opts invalidateOptions, targets []invalidateTarget) error {
+	verb := "deleted"
+	if opts.DryRun {
+		verb = "would delete"
+	}
+
+	failed := 0
+	for _, tg := range targets {
+		if !opts.DryRun {
+			if err := opts.Cache.Delete(ctx, tg.Key); err != nil {
+				if errors.Is(err, storage.ErrNotFound) {
+					continue // race with concurrent delete; not a failure
+				}
+				fmt.Fprintf(opts.Stderr, "failed to delete %s: %v\n", tg.Key, err)
+				failed++
+				continue
+			}
+		}
+		fmt.Fprintf(opts.Stdout, "%s %s %s\n", tg.Key, tg.Method, tg.URL)
+	}
+
+	fmt.Fprintf(opts.Stderr, "%s %d entries\n", verb, len(targets)-failed)
+	if failed > 0 {
+		return fmt.Errorf("%d entries failed to delete", failed)
+	}
+	return nil
 }
 
 func validateInvalidateFilters(opts invalidateOptions) error {
