@@ -65,6 +65,13 @@ func collectTargets(ctx context.Context, opts invalidateOptions) ([]invalidateTa
 			}
 			return meta.URL == opts.URL
 		})
+	case opts.URLPrefix != "":
+		return scanTargets(ctx, opts.Cache, func(meta *cache.EntryMeta) bool {
+			if opts.Method != "" && !strings.EqualFold(meta.Method, opts.Method) {
+				return false
+			}
+			return strings.HasPrefix(meta.URL, opts.URLPrefix)
+		})
 	}
 	return nil, errors.New("not implemented") // filled in by later tasks
 }

@@ -192,3 +192,53 @@ func TestInvalidate_URL_NoMatches(t *testing.T) {
 		t.Fatalf("expected 'deleted 0 entries', got %q", stderr)
 	}
 }
+
+func TestInvalidate_URLPrefix_DeletesMatching(t *testing.T) {
+	c, put := newTestCache(t)
+	put("a", "GET", "https://npmjs.org/pkg/foo")
+	put("b", "GET", "https://npmjs.org/pkg/bar")
+	put("c", "GET", "https://pypi.org/simple/baz")
+
+	_, stderr, err := runOpts(c, func(o *invalidateOptions) {
+		o.URLPrefix = "https://npmjs.org/"
+	})
+	if err != nil {
+		t.Fatalf("runInvalidate: %v", err)
+	}
+
+	for _, k := range []string{"a", "b"} {
+		exists, _ := c.Exists(context.Background(), k)
+		if exists {
+			t.Fatalf("%s should be gone", k)
+		}
+	}
+	exists, _ := c.Exists(context.Background(), "c")
+	if !exists {
+		t.Fatal("c should remain")
+	}
+	if !strings.Contains(stderr, "deleted 2 entries") {
+		t.Fatalf("expected 'deleted 2 entries', got %q", stderr)
+	}
+}
+
+func TestInvalidate_URLPrefix_WithMethodNarrows(t *testing.T) {
+	c, put := newTestCache(t)
+	put("get1", "GET", "https://npmjs.org/pkg/foo")
+	put("post1", "POST", "https://npmjs.org/pkg/foo")
+	put("get2", "GET", "https://npmjs.org/pkg/bar")
+
+	_, stderr, err := runOpts(c, func(o *invalidateOptions) {
+		o.URLPrefix = "https://npmjs.org/"
+		o.Method = "GET"
+	})
+	if err != nil {
+		t.Fatalf("runInvalidate: %v", err)
+	}
+	exists, _ := c.Exists(context.Background(), "post1")
+	if !exists {
+		t.Fatal("post1 should remain")
+	}
+	if !strings.Contains(stderr, "deleted 2 entries") {
+		t.Fatalf("expected 'deleted 2 entries', got %q", stderr)
+	}
+}
