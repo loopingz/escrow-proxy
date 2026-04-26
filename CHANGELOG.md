@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/loopingz/escrow-proxy/compare/v0.3.0...v0.4.0) (2026-04-26)
+
+
+### Features
+
+* **cli:** add cache invalidate subcommand ([#5](https://github.com/loopingz/escrow-proxy/issues/5)) ([a428ecd](https://github.com/loopingz/escrow-proxy/commit/a428ecd1845e204ba9a6f2fe15058ca5452aecf9))
+
 ## [0.3.0](https://github.com/loopingz/escrow-proxy/compare/v0.2.1...v0.3.0) (2026-04-20)
 
 
