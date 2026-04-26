@@ -18,8 +18,13 @@ func New(s storage.Storage) *Cache {
 	return &Cache{storage: s}
 }
 
-func metaKey(key string) string { return key + ".meta" }
-func bodyKey(key string) string { return key + ".body" }
+const (
+	metaSuffix = ".meta"
+	bodySuffix = ".body"
+)
+
+func metaKey(key string) string { return key + metaSuffix }
+func bodyKey(key string) string { return key + bodySuffix }
 
 func (c *Cache) Put(ctx context.Context, key string, meta *EntryMeta, body io.Reader) error {
 	metaBytes, err := MarshalMeta(meta)
@@ -65,8 +70,6 @@ func (c *Cache) Get(ctx context.Context, key string) (*EntryMeta, io.ReadCloser,
 func (c *Cache) Exists(ctx context.Context, key string) (bool, error) {
 	return c.storage.Exists(ctx, metaKey(key))
 }
-
-const metaSuffix = ".meta"
 
 func (c *Cache) Walk(ctx context.Context, fn func(key string, meta *EntryMeta) error) error {
 	keys, err := c.storage.List(ctx, "")
