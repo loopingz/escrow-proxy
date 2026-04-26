@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/loopingz/escrow-proxy/internal/storage"
 )
@@ -63,6 +64,39 @@ func (c *Cache) Get(ctx context.Context, key string) (*EntryMeta, io.ReadCloser,
 
 func (c *Cache) Exists(ctx context.Context, key string) (bool, error) {
 	return c.storage.Exists(ctx, metaKey(key))
+}
+
+const metaSuffix = ".meta"
+
+func (c *Cache) Walk(ctx context.Context, fn func(key string, meta *EntryMeta) error) error {
+	keys, err := c.storage.List(ctx, "")
+	if err != nil {
+		return fmt.Errorf("listing storage: %w", err)
+	}
+	for _, k := range keys {
+		if !strings.HasSuffix(k, metaSuffix) {
+			continue
+		}
+		cacheKey := strings.TrimSuffix(k, metaSuffix)
+
+		rc, err := c.storage.Get(ctx, k)
+		if err != nil {
+			continue // skip unreadable entry
+		}
+		metaBytes, readErr := io.ReadAll(rc)
+		rc.Close()
+		if readErr != nil {
+			continue
+		}
+		meta, err := UnmarshalMeta(metaBytes)
+		if err != nil {
+			continue // skip corrupt entry
+		}
+		if err := fn(cacheKey, meta); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Cache) Delete(ctx context.Context, key string) error {
