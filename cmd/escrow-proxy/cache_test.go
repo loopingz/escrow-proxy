@@ -264,3 +264,56 @@ func TestInvalidate_All_DeletesEverything(t *testing.T) {
 		t.Fatalf("expected 'deleted 3 entries', got %q", stderr)
 	}
 }
+
+func TestInvalidate_DryRun_All_PrintsButLeavesStorage(t *testing.T) {
+	c, put := newTestCache(t)
+	put("a", "GET", "https://example.com/a")
+	put("b", "GET", "https://example.com/b")
+
+	stdout, stderr, err := runOpts(c, func(o *invalidateOptions) {
+		o.All = true
+		o.DryRun = true
+	})
+	if err != nil {
+		t.Fatalf("runInvalidate: %v", err)
+	}
+
+	for _, k := range []string{"a", "b"} {
+		exists, _ := c.Exists(context.Background(), k)
+		if !exists {
+			t.Fatalf("%s should still exist after --dry-run", k)
+		}
+	}
+
+	lines := strings.Count(strings.TrimSpace(stdout), "\n") + 1
+	if lines != 2 {
+		t.Fatalf("expected 2 stdout lines, got %d: %q", lines, stdout)
+	}
+	if !strings.Contains(stderr, "would delete 2 entries") {
+		t.Fatalf("expected 'would delete 2 entries', got %q", stderr)
+	}
+}
+
+func TestInvalidate_DryRun_Key_PrintsExactlyOne(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/a")
+	put("k2", "GET", "https://example.com/b")
+
+	stdout, stderr, err := runOpts(c, func(o *invalidateOptions) {
+		o.Key = "k1"
+		o.DryRun = true
+	})
+	if err != nil {
+		t.Fatalf("runInvalidate: %v", err)
+	}
+	exists, _ := c.Exists(context.Background(), "k1")
+	if !exists {
+		t.Fatal("k1 should still exist after --dry-run")
+	}
+	if !strings.Contains(stdout, "k1") || !strings.Contains(stdout, "https://example.com/a") {
+		t.Fatalf("stdout missing entry details: %q", stdout)
+	}
+	if !strings.Contains(stderr, "would delete 1 entries") {
+		t.Fatalf("expected 'would delete 1 entries', got %q", stderr)
+	}
+}
