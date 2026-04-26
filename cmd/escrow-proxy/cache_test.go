@@ -14,10 +14,9 @@ import (
 
 // newTestCache returns a Cache backed by a fresh tempdir local store
 // and a helper to seed entries.
-func newTestCache(t *testing.T) (*cache.Cache, storage.Storage, func(key, method, url string)) {
+func newTestCache(t *testing.T) (*cache.Cache, func(key, method, url string)) {
 	t.Helper()
-	s := storage.NewLocal(t.TempDir())
-	c := cache.New(s)
+	c := cache.New(storage.NewLocal(t.TempDir()))
 	put := func(key, method, url string) {
 		t.Helper()
 		meta := &cache.EntryMeta{
@@ -30,7 +29,7 @@ func newTestCache(t *testing.T) (*cache.Cache, storage.Storage, func(key, method
 			t.Fatalf("seed Put(%s): %v", key, err)
 		}
 	}
-	return c, s, put
+	return c, put
 }
 
 func runOpts(c *cache.Cache, mutate func(*invalidateOptions)) (string, string, error) {
@@ -48,7 +47,7 @@ func runOpts(c *cache.Cache, mutate func(*invalidateOptions)) (string, string, e
 }
 
 func TestInvalidate_ZeroFilters(t *testing.T) {
-	c, _, _ := newTestCache(t)
+	c, _ := newTestCache(t)
 	_, _, err := runOpts(c, nil)
 	if err == nil || !strings.Contains(err.Error(), "exactly one of") {
 		t.Fatalf("expected 'exactly one of' error, got %v", err)
@@ -56,7 +55,7 @@ func TestInvalidate_ZeroFilters(t *testing.T) {
 }
 
 func TestInvalidate_MultipleFilters(t *testing.T) {
-	c, _, _ := newTestCache(t)
+	c, _ := newTestCache(t)
 	_, _, err := runOpts(c, func(o *invalidateOptions) {
 		o.Key = "abc"
 		o.All = true
@@ -67,7 +66,7 @@ func TestInvalidate_MultipleFilters(t *testing.T) {
 }
 
 func TestInvalidate_AllWithMethodRejected(t *testing.T) {
-	c, _, _ := newTestCache(t)
+	c, _ := newTestCache(t)
 	_, _, err := runOpts(c, func(o *invalidateOptions) {
 		o.All = true
 		o.Method = "GET"
