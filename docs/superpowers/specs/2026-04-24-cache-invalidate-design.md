@@ -59,9 +59,8 @@ Passing zero or more than one filter is a usage error (exit non-zero before touc
 
 `internal/storage/tiered.go` already handles what we need:
 
-- `Tiered.Delete` (tiered.go:79) fans out to every tier concurrently and fails if any tier errors. **One refinement:** treat per-tier `ErrNotFound` as success inside this fan-out, so a delete of an entry that exists in L1 but not yet in L2 doesn't fail the whole operation. Callers that care about existence use `Exists` first.
+- `Tiered.Delete` (tiered.go:79) fans out to every tier concurrently. Each per-tier `Delete` (local, GCS, S3) is idempotent — deleting a missing key returns nil — so scans that delete keys present in one tier but not another will not fail.
 - `Tiered.List` (tiered.go:99) already unions and deduplicates keys across tiers.
-- Per-tier `Delete` (local, GCS, S3) is already implemented by the `Storage` interface.
 
 ### Cache layer — two new methods
 
@@ -69,19 +68,22 @@ Passing zero or more than one filter is a usage error (exit non-zero before touc
 
 ```go
 // Delete removes both <key>.meta and <key>.body.
-// Returns ErrNotFound (wrapped) if meta is absent.
-// If meta delete succeeds but body delete fails, logs and returns nil —
-// the entry is already unreachable via Exists() which checks meta.
+// Returns an error wrapping storage.ErrNotFound if the entry does not exist
+// (meta absent). Any other storage failure is returned as-is; the caller
+// decides whether to treat it as fatal.
 func (c *Cache) Delete(ctx context.Context, key string) error
 
 // Walk iterates every cached entry and calls fn with the parsed meta.
-// Returning an error from fn stops the walk.
+// Returning an error from fn stops the walk and propagates the error.
+// Corrupt or unreadable entries are skipped (fn is not called for them).
 func (c *Cache) Walk(ctx context.Context, fn func(key string, meta *EntryMeta) error) error
 ```
 
-`Walk` is backed by `storage.List(".meta")`, stripping the `.meta` suffix to recover the key, then fetching and unmarshaling the meta blob for each. The scan is O(n) in cache size; this is the price of content-addressed storage with opaque keys.
+`Walk` calls `storage.List("")` to enumerate every key across all tiers (Tiered.List already dedupes), then filters to keys ending in `.meta`, strips the suffix, and fetches + unmarshals the meta blob for each. The scan is O(n) in cache size — the price of content-addressed storage with opaque keys.
 
-A `.meta` blob that fails to fetch or unmarshal is logged and skipped (not fatal) — one corrupt entry must not block invalidation of the rest.
+A `.meta` blob that fails to fetch or unmarshal is skipped (not fatal) — one corrupt entry must not block invalidation of the rest. The CLI logs at debug level when this happens.
+
+`Delete` semantics: `Exists(metaKey)` is checked first to give callers a reliable `ErrNotFound` signal (backends' `Delete` is idempotent and would otherwise succeed silently on a missing key). `Delete` then removes meta then body; a body-delete failure after meta succeeds is returned so the CLI can log it, even though the entry is already unreachable via `Exists`/`Get`.
 
 ### CLI layer — new files
 
@@ -135,17 +137,16 @@ Safe. All backends tolerate concurrent reads/deletes. The only meaningful race i
 
 ### `internal/cache/cache_test.go` — additions
 
-- `Delete` removes both meta and body for an existing key.
+- `Delete` removes both meta and body for an existing key; `Exists` returns false afterward.
 - `Delete` of a missing key returns an error wrapping `storage.ErrNotFound`.
 - `Delete` when meta is absent but body is present returns an error wrapping `ErrNotFound` (meta is the source of truth for existence).
-- `Delete` when meta deletes but body delete fails returns nil (best-effort semantics).
 - `Walk` visits every `Put` entry exactly once with the correct key and meta.
 - `Walk` on an empty cache returns nil without calling fn.
 - `Walk` propagates an error returned by fn and stops iteration.
 
-### `internal/storage/tiered_test.go` — addition
+### `internal/storage/tiered_test.go` — no changes
 
-One test for the `ErrNotFound` refinement in `Tiered.Delete`: deleting a key that exists in one tier but not another returns nil, and the key is gone from the tier that had it.
+Existing coverage is sufficient; the idempotent per-tier `Delete` behavior is already relied on by the `Delete` fan-out test.
 
 ### `cmd/escrow-proxy/cache_test.go` — new file
 
