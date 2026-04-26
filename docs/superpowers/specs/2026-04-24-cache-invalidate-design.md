@@ -81,7 +81,7 @@ func (c *Cache) Walk(ctx context.Context, fn func(key string, meta *EntryMeta) e
 
 `Walk` calls `storage.List("")` to enumerate every key across all tiers (Tiered.List already dedupes), then filters to keys ending in `.meta`, strips the suffix, and fetches + unmarshals the meta blob for each. The scan is O(n) in cache size — the price of content-addressed storage with opaque keys.
 
-A `.meta` blob that fails to fetch or unmarshal is skipped (not fatal) — one corrupt entry must not block invalidation of the rest. The CLI logs at debug level when this happens.
+A `.meta` blob that fails to fetch or unmarshal is skipped silently (not fatal) — one corrupt entry must not block invalidation of the rest. We do not surface these skips to callers; threading a logger through `Cache` for a rare debug-only signal is more plumbing than the value justifies.
 
 `Delete` semantics: `Exists(metaKey)` is checked first to give callers a reliable `ErrNotFound` signal (backends' `Delete` is idempotent and would otherwise succeed silently on a missing key). `Delete` then removes meta then body; a body-delete failure after meta succeeds is returned so the CLI can log it, even though the entry is already unreachable via `Exists`/`Get`.
 
