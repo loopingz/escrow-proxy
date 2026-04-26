@@ -154,6 +154,32 @@ escrow-proxy offline -a registry.example.com/cache:v1
 escrow-proxy offline -a build-deps.tar.gz --allow-fallback
 ```
 
+### Cache management
+
+Delete cache entries without restarting the proxy. The CLI hits every configured storage tier (matching the write path), so an entry deleted here will not backfill from L2.
+
+```bash
+# Delete one entry by raw key (from logs: "cache hit ... key=<hex>")
+escrow-proxy cache invalidate --key 8d3f7a...
+
+# Delete every cached variation of a URL (across methods/headers)
+escrow-proxy cache invalidate --url https://registry.npmjs.org/lodash
+
+# Narrow to a single HTTP method
+escrow-proxy cache invalidate --url https://registry.npmjs.org/lodash --method GET
+
+# Bulk: every entry under a URL prefix
+escrow-proxy cache invalidate --url-prefix https://registry.npmjs.org/
+
+# Nuke the entire cache
+escrow-proxy cache invalidate --all
+
+# Preview without deleting
+escrow-proxy cache invalidate --url-prefix https://registry.npmjs.org/ --dry-run
+```
+
+Exactly one of `--key`, `--url`, `--url-prefix`, `--all` is required. The command uses the same storage flags (`--storage`, `--local-dir`, `--gcs-bucket`, etc.) as `serve`.
+
 ## Request Flow
 
 ```
