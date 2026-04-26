@@ -117,3 +117,78 @@ func TestInvalidate_Key_MissingReturnsError(t *testing.T) {
 		t.Fatalf("expected ErrNotFound wrap, got %v", err)
 	}
 }
+
+func TestInvalidate_URL_DeletesAllVariations(t *testing.T) {
+	c, put := newTestCache(t)
+	put("get", "GET", "https://example.com/x")
+	put("post", "POST", "https://example.com/x")
+	put("other", "GET", "https://example.com/y")
+
+	stdout, stderr, err := runOpts(c, func(o *invalidateOptions) {
+		o.URL = "https://example.com/x"
+	})
+	if err != nil {
+		t.Fatalf("runInvalidate: %v", err)
+	}
+
+	for _, k := range []string{"get", "post"} {
+		exists, _ := c.Exists(context.Background(), k)
+		if exists {
+			t.Fatalf("%s should be gone", k)
+		}
+	}
+	exists, _ := c.Exists(context.Background(), "other")
+	if !exists {
+		t.Fatal("other should remain")
+	}
+
+	lines := strings.Count(strings.TrimSpace(stdout), "\n") + 1
+	if lines != 2 {
+		t.Fatalf("expected 2 stdout lines, got %d: %q", lines, stdout)
+	}
+	if !strings.Contains(stderr, "deleted 2 entries") {
+		t.Fatalf("expected 'deleted 2 entries', got %q", stderr)
+	}
+}
+
+func TestInvalidate_URL_WithMethodNarrows(t *testing.T) {
+	c, put := newTestCache(t)
+	put("get", "GET", "https://example.com/x")
+	put("post", "POST", "https://example.com/x")
+
+	_, stderr, err := runOpts(c, func(o *invalidateOptions) {
+		o.URL = "https://example.com/x"
+		o.Method = "GET"
+	})
+	if err != nil {
+		t.Fatalf("runInvalidate: %v", err)
+	}
+
+	exists, _ := c.Exists(context.Background(), "get")
+	if exists {
+		t.Fatal("get should be gone")
+	}
+	exists, _ = c.Exists(context.Background(), "post")
+	if !exists {
+		t.Fatal("post should remain")
+	}
+
+	if !strings.Contains(stderr, "deleted 1 entries") {
+		t.Fatalf("expected 'deleted 1 entries', got %q", stderr)
+	}
+}
+
+func TestInvalidate_URL_NoMatches(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/x")
+
+	_, stderr, err := runOpts(c, func(o *invalidateOptions) {
+		o.URL = "https://nowhere.test/"
+	})
+	if err != nil {
+		t.Fatalf("runInvalidate: %v", err)
+	}
+	if !strings.Contains(stderr, "deleted 0 entries") {
+		t.Fatalf("expected 'deleted 0 entries', got %q", stderr)
+	}
+}

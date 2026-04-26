@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/loopingz/escrow-proxy/internal/cache"
 	"github.com/loopingz/escrow-proxy/internal/storage"
@@ -57,8 +58,29 @@ func collectTargets(ctx context.Context, opts invalidateOptions) ([]invalidateTa
 		}
 		body.Close()
 		return []invalidateTarget{{Key: opts.Key, Method: meta.Method, URL: meta.URL}}, nil
+	case opts.URL != "":
+		return scanTargets(ctx, opts.Cache, func(meta *cache.EntryMeta) bool {
+			if opts.Method != "" && !strings.EqualFold(meta.Method, opts.Method) {
+				return false
+			}
+			return meta.URL == opts.URL
+		})
 	}
 	return nil, errors.New("not implemented") // filled in by later tasks
+}
+
+func scanTargets(ctx context.Context, c *cache.Cache, match func(*cache.EntryMeta) bool) ([]invalidateTarget, error) {
+	var out []invalidateTarget
+	err := c.Walk(ctx, func(key string, meta *cache.EntryMeta) error {
+		if match(meta) {
+			out = append(out, invalidateTarget{Key: key, Method: meta.Method, URL: meta.URL})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scanning cache: %w", err)
+	}
+	return out, nil
 }
 
 func executeDeletes(ctx context.Context, opts invalidateOptions, targets []invalidateTarget) error {
@@ -68,10 +90,12 @@ func executeDeletes(ctx context.Context, opts invalidateOptions, targets []inval
 	}
 
 	failed := 0
+	raced := 0
 	for _, tg := range targets {
 		if !opts.DryRun {
 			if err := opts.Cache.Delete(ctx, tg.Key); err != nil {
 				if errors.Is(err, storage.ErrNotFound) {
+					raced++
 					continue // race with concurrent delete; not a failure
 				}
 				fmt.Fprintf(opts.Stderr, "failed to delete %s: %v\n", tg.Key, err)
@@ -82,7 +106,7 @@ func executeDeletes(ctx context.Context, opts invalidateOptions, targets []inval
 		fmt.Fprintf(opts.Stdout, "%s %s %s\n", tg.Key, tg.Method, tg.URL)
 	}
 
-	fmt.Fprintf(opts.Stderr, "%s %d entries\n", verb, len(targets)-failed)
+	fmt.Fprintf(opts.Stderr, "%s %d entries\n", verb, len(targets)-failed-raced)
 	if failed > 0 {
 		return fmt.Errorf("%d entries failed to delete", failed)
 	}
