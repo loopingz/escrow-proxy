@@ -4,6 +4,12 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)run GoReleaser on (e.g. v0.4.0). Skips release-please."
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -13,6 +19,7 @@ permissions:
 
 jobs:
   release-please:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
@@ -26,14 +33,47 @@ jobs:
 
   goreleaser:
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    if: |
+      always() &&
+      (
+        (github.event_name == 'push' && needs.release-please.outputs.release_created == 'true') ||
+        github.event_name == 'workflow_dispatch'
+      )
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || needs.release-please.outputs.tag_name }}
     steps:
+      - name: Verify tag exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh api "repos/${{ github.repository }}/git/refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "::error::Tag ${RELEASE_TAG} does not exist in this repository."
+            exit 1
+          fi
+
+      - name: Block if release artifacts already exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! release_json=$(gh release view "${RELEASE_TAG}" --json assets 2>/dev/null); then
+            echo "No GitHub release found for ${RELEASE_TAG}; nothing to block."
+            exit 0
+          fi
+          asset_count=$(echo "${release_json}" | jq '.assets | length')
+          has_checksums=$(echo "${release_json}" | jq '[.assets[].name] | any(. == "checksums.txt")')
+          echo "Release ${RELEASE_TAG} has ${asset_count} asset(s); checksums.txt present: ${has_checksums}"
+          if [ "${has_checksums}" = "true" ]; then
+            echo "::error::Release ${RELEASE_TAG} already has checksums.txt (and ${asset_count} assets). Refusing to overwrite. Delete the assets manually if you intend to re-release."
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ env.RELEASE_TAG }}
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -67,3 +107,4 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ env.RELEASE_TAG }}
