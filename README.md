@@ -207,6 +207,56 @@ escrow-proxy cache show --url https://registry.npmjs.org/lodash --method GET
 escrow-proxy cache show --key 8d3f7a... --output /tmp/lodash.json
 ```
 
+#### Evicting old entries
+
+`cache evict` shrinks the local cache to a target total body size by
+deleting the least-recently-used entries first. Eviction targets L1
+only — cloud tiers (GCS/S3) are never touched, since those manage
+their own lifecycle.
+
+```bash
+# Shrink the local cache to 150 GB; never evict entries hit in the last 24h
+escrow-proxy cache evict --target-size 150G --min-age 24h
+
+# Preview without deleting
+escrow-proxy cache evict --target-size 150G --dry-run
+
+# Machine-readable output (one JSON object per evicted entry)
+escrow-proxy cache evict --target-size 100G --json
+```
+
+`--target-size` accepts SI suffixes (K, M, G, T — 1024-based).
+`--min-age` accepts Go's duration syntax plus `d` (days) and `w` (weeks):
+`24h`, `7d`, `2w`.
+
+#### The SQLite index
+
+`cache list`, `cache show`, and `cache evict` are backed by a local
+SQLite index at `<local-dir>/index.db`. The index tracks `last_accessed_at`
+and `hit_count` per entry; updates buffer in memory and flush every 30s
+or every 1000 hits, whichever comes first.
+
+```bash
+# Override the default location
+escrow-proxy serve --index-db /var/lib/escrow/index.db
+
+# Disable the index (cache list / show fall back to walking .meta files;
+# cache evict / reindex are unavailable)
+escrow-proxy --no-index cache list
+```
+
+After enabling the index for the first time on an existing cache, `serve`
+auto-runs `cache reindex` to populate it. You can re-run reindex any time
+to repair drift (e.g., after manually deleting files):
+
+```bash
+escrow-proxy cache reindex            # rebuilds the DB from disk
+escrow-proxy cache reindex --dry-run  # report only
+```
+
+Usage stats (`last_accessed_at`, `hit_count`) are preserved across
+reindex on already-indexed entries.
+
 ## Request Flow
 
 ```

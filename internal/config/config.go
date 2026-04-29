@@ -27,9 +27,17 @@ type CAConfig struct {
 }
 
 type CacheConfig struct {
-	KeyHeaders      []string `yaml:"key_headers"`
-	Methods         []string `yaml:"methods"`
-	ExcludePatterns []string `yaml:"exclude_patterns"`
+	KeyHeaders      []string         `yaml:"key_headers"`
+	Methods         []string         `yaml:"methods"`
+	ExcludePatterns []string         `yaml:"exclude_patterns"`
+	Index           CacheIndexConfig `yaml:"index"`
+}
+
+type CacheIndexConfig struct {
+	Enabled        *bool         `yaml:"enabled,omitempty"` // nil = default (true)
+	Path           string        `yaml:"path,omitempty"`
+	FlushInterval  time.Duration `yaml:"flush_interval,omitempty"`
+	FlushThreshold int           `yaml:"flush_threshold,omitempty"`
 }
 
 type StorageConfig struct {
