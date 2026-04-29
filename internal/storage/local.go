@@ -60,6 +60,17 @@ func (l *Local) Exists(_ context.Context, key string) (bool, error) {
 	return true, nil
 }
 
+func (l *Local) Size(_ context.Context, key string) (int64, error) {
+	info, err := os.Stat(l.keyPath(key))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, fmt.Errorf("%w: %s", ErrNotFound, key)
+		}
+		return 0, fmt.Errorf("stat %s: %w", key, err)
+	}
+	return info.Size(), nil
+}
+
 func (l *Local) Delete(_ context.Context, key string) error {
 	err := os.Remove(l.keyPath(key))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {

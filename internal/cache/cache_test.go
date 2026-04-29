@@ -132,6 +132,34 @@ func TestCache_Delete_BodyPresentMetaAbsent_ReturnsErrNotFound(t *testing.T) {
 	}
 }
 
+func TestCache_Size_ReturnsBodyByteCount(t *testing.T) {
+	s := storage.NewLocal(t.TempDir())
+	c := cache.New(s)
+	ctx := context.Background()
+
+	body := []byte("0123456789ab")
+	meta := &cache.EntryMeta{Method: "GET", URL: "https://example.com/x", StatusCode: 200}
+	if err := c.Put(ctx, "k", meta, bytes.NewReader(body)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	n, err := c.Size(ctx, "k")
+	if err != nil {
+		t.Fatalf("Size: %v", err)
+	}
+	if n != int64(len(body)) {
+		t.Fatalf("got %d, want %d", n, len(body))
+	}
+}
+
+func TestCache_Size_NotFound(t *testing.T) {
+	c := cache.New(storage.NewLocal(t.TempDir()))
+	_, err := c.Size(context.Background(), "missing")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
 func TestCache_Walk_VisitsEveryEntryOnce(t *testing.T) {
 	s := storage.NewLocal(t.TempDir())
 	c := cache.New(s)

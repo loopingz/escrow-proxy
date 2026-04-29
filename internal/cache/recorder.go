@@ -111,3 +111,7 @@ func (s *recordingStorage) Delete(ctx context.Context, key string) error {
 func (s *recordingStorage) List(ctx context.Context, prefix string) ([]string, error) {
 	return s.inner.List(ctx, prefix)
 }
+
+func (s *recordingStorage) Size(ctx context.Context, key string) (int64, error) {
+	return s.inner.Size(ctx, key)
+}

@@ -60,6 +60,17 @@ func (g *GCS) Exists(ctx context.Context, key string) (bool, error) {
 	return true, nil
 }
 
+func (g *GCS) Size(ctx context.Context, key string) (int64, error) {
+	attrs, err := g.client.Bucket(g.bucket).Object(g.objectName(key)).Attrs(ctx)
+	if err != nil {
+		if errors.Is(err, gcsstorage.ErrObjectNotExist) {
+			return 0, fmt.Errorf("%w: %s", ErrNotFound, key)
+		}
+		return 0, fmt.Errorf("stat %s in GCS: %w", key, err)
+	}
+	return attrs.Size, nil
+}
+
 func (g *GCS) Delete(ctx context.Context, key string) error {
 	err := g.client.Bucket(g.bucket).Object(g.objectName(key)).Delete(ctx)
 	if err != nil && !errors.Is(err, gcsstorage.ErrObjectNotExist) {

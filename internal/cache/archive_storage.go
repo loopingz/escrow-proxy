@@ -58,6 +58,19 @@ func (s *ArchiveStorage) Exists(ctx context.Context, key string) (bool, error) {
 	return true, nil
 }
 
+func (s *ArchiveStorage) Size(ctx context.Context, key string) (int64, error) {
+	rc, err := s.Get(ctx, key)
+	if err != nil {
+		return 0, err
+	}
+	defer rc.Close()
+	n, err := io.Copy(io.Discard, rc)
+	if err != nil {
+		return 0, fmt.Errorf("reading %s for size: %w", key, err)
+	}
+	return n, nil
+}
+
 func (s *ArchiveStorage) Delete(_ context.Context, _ string) error {
 	return fmt.Errorf("archive storage is read-only")
 }

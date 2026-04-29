@@ -3,6 +3,7 @@ package storage_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"testing"
 
@@ -95,6 +96,40 @@ func TestTieredStorage_DeleteFromAllTiers(t *testing.T) {
 		if exists {
 			t.Fatalf("expected key deleted from tier %d", i)
 		}
+	}
+}
+
+func TestTieredStorage_Size_FallsThroughToL2(t *testing.T) {
+	l1 := storage.NewLocal(t.TempDir())
+	l2 := storage.NewLocal(t.TempDir())
+	tiered := storage.NewTiered([]storage.Storage{l1, l2})
+	ctx := context.Background()
+
+	data := []byte("seven!!")
+	if err := l2.Put(ctx, "k", bytes.NewReader(data)); err != nil {
+		t.Fatalf("L2 Put: %v", err)
+	}
+
+	n, err := tiered.Size(ctx, "k")
+	if err != nil {
+		t.Fatalf("Size: %v", err)
+	}
+	if n != int64(len(data)) {
+		t.Fatalf("got %d, want %d", n, len(data))
+	}
+}
+
+func TestTieredStorage_Size_NotFoundEverywhere(t *testing.T) {
+	tiered := storage.NewTiered([]storage.Storage{
+		storage.NewLocal(t.TempDir()),
+		storage.NewLocal(t.TempDir()),
+	})
+	_, err := tiered.Size(context.Background(), "missing")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }
 

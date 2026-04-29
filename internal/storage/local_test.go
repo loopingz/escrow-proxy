@@ -97,6 +97,36 @@ func TestLocalStorage_Delete(t *testing.T) {
 	}
 }
 
+func TestLocalStorage_Size_ReturnsByteCount(t *testing.T) {
+	dir := t.TempDir()
+	s := storage.NewLocal(dir)
+	ctx := context.Background()
+
+	data := []byte("hello world!")
+	if err := s.Put(ctx, "k", bytes.NewReader(data)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	n, err := s.Size(ctx, "k")
+	if err != nil {
+		t.Fatalf("Size: %v", err)
+	}
+	if n != int64(len(data)) {
+		t.Fatalf("got %d, want %d", n, len(data))
+	}
+}
+
+func TestLocalStorage_Size_NotFound(t *testing.T) {
+	s := storage.NewLocal(t.TempDir())
+	_, err := s.Size(context.Background(), "missing")
+	if err == nil {
+		t.Fatal("expected error for missing key")
+	}
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
 func TestLocalStorage_List(t *testing.T) {
 	dir := t.TempDir()
 	s := storage.NewLocal(dir)

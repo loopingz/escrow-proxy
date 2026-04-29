@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -61,6 +62,19 @@ func (t *Tiered) Put(ctx context.Context, key string, r io.Reader) error {
 		}
 	}
 	return nil
+}
+
+func (t *Tiered) Size(ctx context.Context, key string) (int64, error) {
+	for _, tier := range t.tiers {
+		n, err := tier.Size(ctx, key)
+		if err == nil {
+			return n, nil
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return 0, err
+		}
+	}
+	return 0, fmt.Errorf("%w: %s", ErrNotFound, key)
 }
 
 func (t *Tiered) Exists(ctx context.Context, key string) (bool, error) {

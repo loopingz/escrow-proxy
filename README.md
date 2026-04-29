@@ -180,6 +180,33 @@ escrow-proxy cache invalidate --url-prefix https://registry.npmjs.org/ --dry-run
 
 Exactly one of `--key`, `--url`, `--url-prefix`, `--all` is required. The command uses the same storage flags (`--storage`, `--local-dir`, `--gcs-bucket`, etc.) as `serve`.
 
+#### Inspecting cache contents
+
+`cache list` and `cache show` answer "is this URL cached, what's its digest, what does the response look like?":
+
+```bash
+# Find every cached variation of a URL (key, method, status, body bytes, url)
+escrow-proxy cache list --url https://registry.npmjs.org/lodash
+
+# Same with a prefix
+escrow-proxy cache list --url-prefix https://registry.npmjs.org/
+
+# Walk the whole cache (capped at 1000 rows by default)
+escrow-proxy cache list
+
+# Machine-readable
+escrow-proxy cache list --url-prefix https://pypi.org/ --json
+
+# Inspect a single entry: status, headers, body size
+escrow-proxy cache show --key 8d3f7a...
+
+# Look up by URL (errors if more than one entry matches; pass --key then)
+escrow-proxy cache show --url https://registry.npmjs.org/lodash --method GET
+
+# Dump the response body to a file (refused on a TTY without --output)
+escrow-proxy cache show --key 8d3f7a... --output /tmp/lodash.json
+```
+
 ## Request Flow
 
 ```

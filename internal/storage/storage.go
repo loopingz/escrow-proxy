@@ -14,4 +14,5 @@ type Storage interface {
 	Exists(ctx context.Context, key string) (bool, error)
 	Delete(ctx context.Context, key string) error
 	List(ctx context.Context, prefix string) ([]string, error)
+	Size(ctx context.Context, key string) (int64, error)
 }

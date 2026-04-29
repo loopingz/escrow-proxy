@@ -71,6 +71,10 @@ func (c *Cache) Exists(ctx context.Context, key string) (bool, error) {
 	return c.storage.Exists(ctx, metaKey(key))
 }
 
+func (c *Cache) Size(ctx context.Context, key string) (int64, error) {
+	return c.storage.Size(ctx, bodyKey(key))
+}
+
 func (c *Cache) Walk(ctx context.Context, fn func(key string, meta *EntryMeta) error) error {
 	keys, err := c.storage.List(ctx, "")
 	if err != nil {
