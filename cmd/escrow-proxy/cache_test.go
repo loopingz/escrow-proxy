@@ -3,9 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -327,4 +331,496 @@ func TestCacheInvalidate_HelpExits0(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("--help should exit 0, got %v", err)
 	}
+}
+
+// ---- list ----
+
+func runListOpts(c *cache.Cache, mutate func(*listOptions)) (string, string, error) {
+	var stdout, stderr bytes.Buffer
+	opts := listOptions{
+		Cache:  c,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}
+	if mutate != nil {
+		mutate(&opts)
+	}
+	err := runList(context.Background(), opts)
+	return stdout.String(), stderr.String(), err
+}
+
+func TestList_NoFilter_ListsAllUnderImplicitCap(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/a")
+	put("k2", "POST", "https://example.com/b")
+	put("k3", "GET", "https://other.test/c")
+
+	stdout, stderr, err := runListOpts(c, nil)
+	if err != nil {
+		t.Fatalf("runList: %v", err)
+	}
+	lines := nonEmptyLines(stdout)
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d: %q", len(lines), stdout)
+	}
+	for _, want := range []string{"k1 GET 200", "k2 POST 200", "k3 GET 200"} {
+		if !linesContain(lines, want) {
+			t.Fatalf("expected a line containing %q, got %q", want, stdout)
+		}
+	}
+	if strings.Contains(stderr, "truncated") {
+		t.Fatalf("did not expect truncation note: %q", stderr)
+	}
+}
+
+func TestList_NoFilter_ImplicitCap1000(t *testing.T) {
+	c, put := newTestCache(t)
+	for i := 0; i < 1001; i++ {
+		put(fmt.Sprintf("k%04d", i), "GET", fmt.Sprintf("https://example.com/%d", i))
+	}
+	stdout, stderr, err := runListOpts(c, nil)
+	if err != nil {
+		t.Fatalf("runList: %v", err)
+	}
+	lines := nonEmptyLines(stdout)
+	if len(lines) != 1000 {
+		t.Fatalf("expected 1000 lines, got %d", len(lines))
+	}
+	if !strings.Contains(stderr, "truncated at 1000 entries") {
+		t.Fatalf("expected truncation note, got %q", stderr)
+	}
+}
+
+func TestList_NoFilter_ExplicitLimitZeroDisablesCap(t *testing.T) {
+	c, put := newTestCache(t)
+	for i := 0; i < 1001; i++ {
+		put(fmt.Sprintf("k%04d", i), "GET", fmt.Sprintf("https://example.com/%d", i))
+	}
+	stdout, stderr, err := runListOpts(c, func(o *listOptions) {
+		o.Limit = 0
+		o.LimitSet = true
+	})
+	if err != nil {
+		t.Fatalf("runList: %v", err)
+	}
+	lines := nonEmptyLines(stdout)
+	if len(lines) != 1001 {
+		t.Fatalf("expected 1001 lines, got %d", len(lines))
+	}
+	if strings.Contains(stderr, "truncated") {
+		t.Fatalf("did not expect truncation note: %q", stderr)
+	}
+}
+
+func TestList_ExplicitLimitTruncates(t *testing.T) {
+	c, put := newTestCache(t)
+	for i := 0; i < 5; i++ {
+		put(fmt.Sprintf("k%d", i), "GET", fmt.Sprintf("https://example.com/%d", i))
+	}
+	stdout, stderr, err := runListOpts(c, func(o *listOptions) {
+		o.Limit = 2
+		o.LimitSet = true
+	})
+	if err != nil {
+		t.Fatalf("runList: %v", err)
+	}
+	lines := nonEmptyLines(stdout)
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d", len(lines))
+	}
+	if !strings.Contains(stderr, "truncated at 2 entries") {
+		t.Fatalf("expected truncation note, got %q", stderr)
+	}
+}
+
+func TestList_URL_ExactMatch(t *testing.T) {
+	c, put := newTestCache(t)
+	put("get", "GET", "https://example.com/x")
+	put("post", "POST", "https://example.com/x")
+	put("other", "GET", "https://example.com/y")
+
+	stdout, _, err := runListOpts(c, func(o *listOptions) {
+		o.URL = "https://example.com/x"
+	})
+	if err != nil {
+		t.Fatalf("runList: %v", err)
+	}
+	lines := nonEmptyLines(stdout)
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d: %q", len(lines), stdout)
+	}
+	for _, k := range []string{"get", "post"} {
+		if !linesContain(lines, k+" ") {
+			t.Fatalf("expected %s in output, got %q", k, stdout)
+		}
+	}
+}
+
+func TestList_URLPrefix_Match(t *testing.T) {
+	c, put := newTestCache(t)
+	put("a", "GET", "https://npmjs.org/pkg/foo")
+	put("b", "GET", "https://npmjs.org/pkg/bar")
+	put("c", "GET", "https://pypi.org/simple/baz")
+
+	stdout, _, err := runListOpts(c, func(o *listOptions) {
+		o.URLPrefix = "https://npmjs.org/"
+	})
+	if err != nil {
+		t.Fatalf("runList: %v", err)
+	}
+	lines := nonEmptyLines(stdout)
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d", len(lines))
+	}
+}
+
+func TestList_URLPrefix_WithMethod(t *testing.T) {
+	c, put := newTestCache(t)
+	put("get1", "GET", "https://npmjs.org/pkg/foo")
+	put("post1", "POST", "https://npmjs.org/pkg/foo")
+	put("get2", "GET", "https://npmjs.org/pkg/bar")
+
+	stdout, _, err := runListOpts(c, func(o *listOptions) {
+		o.URLPrefix = "https://npmjs.org/"
+		o.Method = "GET"
+	})
+	if err != nil {
+		t.Fatalf("runList: %v", err)
+	}
+	lines := nonEmptyLines(stdout)
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d: %q", len(lines), stdout)
+	}
+	if linesContain(lines, "post1 ") {
+		t.Fatal("post1 should not appear")
+	}
+}
+
+func TestList_Key_SingleEntry(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/a")
+	put("k2", "GET", "https://example.com/b")
+
+	stdout, _, err := runListOpts(c, func(o *listOptions) { o.Key = "k1" })
+	if err != nil {
+		t.Fatalf("runList: %v", err)
+	}
+	lines := nonEmptyLines(stdout)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 line, got %d: %q", len(lines), stdout)
+	}
+	if !strings.Contains(stdout, "k1") || !strings.Contains(stdout, "https://example.com/a") {
+		t.Fatalf("unexpected stdout: %q", stdout)
+	}
+}
+
+func TestList_Key_NotFound(t *testing.T) {
+	c, _ := newTestCache(t)
+	_, _, err := runListOpts(c, func(o *listOptions) { o.Key = "ghost" })
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestList_BodySizeColumnIsByteCount(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/a") // body = "body-k1" → 7 bytes
+
+	stdout, _, err := runListOpts(c, nil)
+	if err != nil {
+		t.Fatalf("runList: %v", err)
+	}
+	// columns: <key> <method> <status> <body-bytes> <url>
+	fields := strings.Fields(strings.TrimSpace(stdout))
+	if len(fields) < 5 {
+		t.Fatalf("expected >=5 fields, got %v", fields)
+	}
+	if fields[3] != "7" {
+		t.Fatalf("expected body-size column = 7, got %q (full: %q)", fields[3], stdout)
+	}
+}
+
+func TestList_JSON_Output(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/a")
+
+	stdout, _, err := runListOpts(c, func(o *listOptions) { o.JSON = true })
+	if err != nil {
+		t.Fatalf("runList: %v", err)
+	}
+	lines := nonEmptyLines(stdout)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 NDJSON line, got %d", len(lines))
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+		t.Fatalf("invalid JSON: %v (line: %q)", err, lines[0])
+	}
+	for _, k := range []string{"key", "method", "url", "status", "body_size"} {
+		if _, ok := got[k]; !ok {
+			t.Fatalf("missing field %q in JSON: %v", k, got)
+		}
+	}
+	if got["key"] != "k1" || got["method"] != "GET" || got["url"] != "https://example.com/a" {
+		t.Fatalf("wrong values: %v", got)
+	}
+}
+
+func TestList_MutualExclusion(t *testing.T) {
+	c, _ := newTestCache(t)
+	_, _, err := runListOpts(c, func(o *listOptions) {
+		o.URL = "x"
+		o.Key = "y"
+	})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected mutually-exclusive error, got %v", err)
+	}
+}
+
+func TestList_MethodWithoutURL(t *testing.T) {
+	c, _ := newTestCache(t)
+	_, _, err := runListOpts(c, func(o *listOptions) { o.Method = "GET" })
+	if err == nil || !strings.Contains(err.Error(), "--method") {
+		t.Fatalf("expected --method error, got %v", err)
+	}
+}
+
+func TestList_NegativeLimitRejected(t *testing.T) {
+	c, _ := newTestCache(t)
+	_, _, err := runListOpts(c, func(o *listOptions) {
+		o.Limit = -1
+		o.LimitSet = true
+	})
+	if err == nil || !strings.Contains(err.Error(), "--limit") {
+		t.Fatalf("expected limit validation error, got %v", err)
+	}
+}
+
+// ---- show ----
+
+func runShowOpts(c *cache.Cache, mutate func(*showOptions)) (string, string, error) {
+	var stdout, stderr bytes.Buffer
+	opts := showOptions{
+		Cache:  c,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}
+	if mutate != nil {
+		mutate(&opts)
+	}
+	err := runShow(context.Background(), opts)
+	return stdout.String(), stderr.String(), err
+}
+
+func TestShow_Key_PrintsMetadataBlock(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/a")
+
+	stdout, _, err := runShowOpts(c, func(o *showOptions) { o.Key = "k1" })
+	if err != nil {
+		t.Fatalf("runShow: %v", err)
+	}
+	for _, want := range []string{"key:", "k1", "method:", "GET", "url:", "https://example.com/a", "status:", "200", "body-size:", "7", "headers:", "Content-Type"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("missing %q in stdout: %q", want, stdout)
+		}
+	}
+}
+
+func TestShow_Key_NotFound(t *testing.T) {
+	c, _ := newTestCache(t)
+	_, _, err := runShowOpts(c, func(o *showOptions) { o.Key = "ghost" })
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected not-found error, got %v", err)
+	}
+}
+
+func TestShow_URL_SingleMatch(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/a")
+	put("k2", "GET", "https://example.com/b")
+
+	stdout, _, err := runShowOpts(c, func(o *showOptions) {
+		o.URL = "https://example.com/a"
+	})
+	if err != nil {
+		t.Fatalf("runShow: %v", err)
+	}
+	if !strings.Contains(stdout, "k1") {
+		t.Fatalf("expected k1 in stdout: %q", stdout)
+	}
+}
+
+func TestShow_URL_MultipleMatches_AmbiguityError(t *testing.T) {
+	c, put := newTestCache(t)
+	put("get", "GET", "https://example.com/x")
+	put("post", "POST", "https://example.com/x")
+
+	_, stderr, err := runShowOpts(c, func(o *showOptions) {
+		o.URL = "https://example.com/x"
+	})
+	if err == nil || !strings.Contains(err.Error(), "multiple") {
+		t.Fatalf("expected ambiguity error, got %v", err)
+	}
+	for _, k := range []string{"get", "post"} {
+		if !strings.Contains(stderr, k) {
+			t.Fatalf("expected stderr to list %s, got %q", k, stderr)
+		}
+	}
+}
+
+func TestShow_URL_NoMatch(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/a")
+
+	_, _, err := runShowOpts(c, func(o *showOptions) {
+		o.URL = "https://nowhere.test/"
+	})
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected not-found error, got %v", err)
+	}
+}
+
+func TestShow_JSON_Output(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/a")
+
+	stdout, _, err := runShowOpts(c, func(o *showOptions) {
+		o.Key = "k1"
+		o.JSON = true
+	})
+	if err != nil {
+		t.Fatalf("runShow: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &got); err != nil {
+		t.Fatalf("invalid JSON: %v (stdout: %q)", err, stdout)
+	}
+	for _, k := range []string{"key", "method", "url", "status", "body_size", "headers"} {
+		if _, ok := got[k]; !ok {
+			t.Fatalf("missing field %q in JSON: %v", k, got)
+		}
+	}
+	if got["key"] != "k1" {
+		t.Fatalf("wrong key: %v", got)
+	}
+}
+
+func TestShow_BodyToOutputFile(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/a")
+
+	dst := filepath.Join(t.TempDir(), "out.bin")
+	_, stderr, err := runShowOpts(c, func(o *showOptions) {
+		o.Key = "k1"
+		o.Output = dst
+	})
+	if err != nil {
+		t.Fatalf("runShow: %v", err)
+	}
+
+	got, readErr := os.ReadFile(dst)
+	if readErr != nil {
+		t.Fatalf("read output: %v", readErr)
+	}
+	if string(got) != "body-k1" {
+		t.Fatalf("got %q, want %q", got, "body-k1")
+	}
+	if !strings.Contains(stderr, "wrote 7 bytes") {
+		t.Fatalf("expected stderr confirmation, got %q", stderr)
+	}
+}
+
+func TestShow_BodyToTTY_Refused(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/a")
+
+	_, _, err := runShowOpts(c, func(o *showOptions) {
+		o.Key = "k1"
+		o.Body = true
+		o.StdoutIsTTY = true
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing") {
+		t.Fatalf("expected TTY refusal, got %v", err)
+	}
+}
+
+func TestShow_BodyToNonTTY_AppendsToStdout(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/a")
+
+	stdout, _, err := runShowOpts(c, func(o *showOptions) {
+		o.Key = "k1"
+		o.Body = true
+		o.StdoutIsTTY = false
+	})
+	if err != nil {
+		t.Fatalf("runShow: %v", err)
+	}
+	if !strings.Contains(stdout, "body-k1") {
+		t.Fatalf("expected body in stdout: %q", stdout)
+	}
+}
+
+func TestShow_OutputImpliesBody(t *testing.T) {
+	// --output without --body should still write file; --body left unset.
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/a")
+
+	dst := filepath.Join(t.TempDir(), "out.bin")
+	_, _, err := runShowOpts(c, func(o *showOptions) {
+		o.Key = "k1"
+		o.Output = dst
+		o.Body = false
+	})
+	if err != nil {
+		t.Fatalf("runShow: %v", err)
+	}
+	got, readErr := os.ReadFile(dst)
+	if readErr != nil {
+		t.Fatalf("read output: %v", readErr)
+	}
+	if string(got) != "body-k1" {
+		t.Fatalf("got %q, want body-k1", got)
+	}
+}
+
+func TestShow_KeyAndURLMutuallyExclusive(t *testing.T) {
+	c, _ := newTestCache(t)
+	_, _, err := runShowOpts(c, func(o *showOptions) {
+		o.Key = "k"
+		o.URL = "x"
+	})
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("expected mutual-exclusion error, got %v", err)
+	}
+}
+
+func TestShow_MissingKeyAndURL(t *testing.T) {
+	c, _ := newTestCache(t)
+	_, _, err := runShowOpts(c, nil)
+	if err == nil || !strings.Contains(err.Error(), "--key or --url") {
+		t.Fatalf("expected required-flag error, got %v", err)
+	}
+}
+
+// ---- helpers ----
+
+func nonEmptyLines(s string) []string {
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimSpace(l) != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+func linesContain(lines []string, needle string) bool {
+	for _, l := range lines {
+		if strings.Contains(l, needle) {
+			return true
+		}
+	}
+	return false
 }
