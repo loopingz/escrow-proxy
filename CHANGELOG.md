@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/loopingz/escrow-proxy/compare/v0.4.0...v0.5.0) (2026-04-30)
+
+
+### Features
+
+* **cache:** add SQLite index + cache evict/reindex CLI ([#9](https://github.com/loopingz/escrow-proxy/issues/9)) ([0c07abc](https://github.com/loopingz/escrow-proxy/commit/0c07abc452020a3bd132a3834292e3c801a86f06))
+* **cli:** add cache list and cache show subcommands ([#7](https://github.com/loopingz/escrow-proxy/issues/7)) ([7ebfb78](https://github.com/loopingz/escrow-proxy/commit/7ebfb787ecb9d81dc1d9b7f1e3490a5db5e657f0))
+
 ## [0.4.0](https://github.com/loopingz/escrow-proxy/compare/v0.3.0...v0.4.0) (2026-04-26)
 
 
