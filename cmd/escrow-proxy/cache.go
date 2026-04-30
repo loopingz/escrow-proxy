@@ -9,9 +9,13 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/loopingz/escrow-proxy/internal/cache"
+	"github.com/loopingz/escrow-proxy/internal/config"
+	"github.com/loopingz/escrow-proxy/internal/index"
 	"github.com/loopingz/escrow-proxy/internal/storage"
 	"github.com/spf13/cobra"
 )
@@ -222,6 +226,50 @@ func runList(ctx context.Context, opts listOptions) error {
 }
 
 func collectListEntries(ctx context.Context, opts listOptions, limit int) ([]listEntry, bool, error) {
+	if idx := opts.Cache.Index(); idx != nil {
+		return collectListEntriesFromIndex(ctx, idx, opts, limit)
+	}
+	return collectListEntriesFromWalk(ctx, opts, limit)
+}
+
+func collectListEntriesFromIndex(ctx context.Context, idx *index.Index, opts listOptions, limit int) ([]listEntry, bool, error) {
+	// Pull limit+1 to detect truncation cleanly.
+	queryLimit := 0
+	if limit > 0 {
+		queryLimit = limit + 1
+	}
+	rows, err := idx.List(ctx, index.ListFilter{
+		Key:       opts.Key,
+		URL:       opts.URL,
+		URLPrefix: opts.URLPrefix,
+		Method:    opts.Method,
+		Limit:     queryLimit,
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("index list: %w", err)
+	}
+	if opts.Key != "" && len(rows) == 0 {
+		return nil, false, fmt.Errorf("locating entry: %w: %s", storage.ErrNotFound, opts.Key)
+	}
+	truncated := false
+	if limit > 0 && len(rows) > limit {
+		rows = rows[:limit]
+		truncated = true
+	}
+	out := make([]listEntry, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, listEntry{
+			Key:      r.Key,
+			Method:   r.Method,
+			URL:      r.URL,
+			Status:   r.Status,
+			BodySize: r.BodySize,
+		})
+	}
+	return out, truncated, nil
+}
+
+func collectListEntriesFromWalk(ctx context.Context, opts listOptions, limit int) ([]listEntry, bool, error) {
 	if opts.Key != "" {
 		meta, body, err := opts.Cache.Get(ctx, opts.Key)
 		if err != nil {
@@ -421,19 +469,30 @@ func resolveShowKey(ctx context.Context, opts showOptions) (string, error) {
 		return opts.Key, nil
 	}
 
-	predicate := urlMethodPredicate(opts.URL, "", opts.Method)
 	type candidate struct {
 		key, method, url string
 	}
 	var matches []candidate
-	walkErr := opts.Cache.Walk(ctx, func(key string, meta *cache.EntryMeta) error {
-		if predicate(meta) {
-			matches = append(matches, candidate{key, meta.Method, meta.URL})
+
+	if idx := opts.Cache.Index(); idx != nil {
+		rows, err := idx.List(ctx, index.ListFilter{URL: opts.URL, Method: opts.Method})
+		if err != nil {
+			return "", fmt.Errorf("index list: %w", err)
 		}
-		return nil
-	})
-	if walkErr != nil {
-		return "", fmt.Errorf("scanning cache: %w", walkErr)
+		for _, r := range rows {
+			matches = append(matches, candidate{r.Key, r.Method, r.URL})
+		}
+	} else {
+		predicate := urlMethodPredicate(opts.URL, "", opts.Method)
+		walkErr := opts.Cache.Walk(ctx, func(key string, meta *cache.EntryMeta) error {
+			if predicate(meta) {
+				matches = append(matches, candidate{key, meta.Method, meta.URL})
+			}
+			return nil
+		})
+		if walkErr != nil {
+			return "", fmt.Errorf("scanning cache: %w", walkErr)
+		}
 	}
 	if len(matches) == 0 {
 		return "", fmt.Errorf("not found: %s", opts.URL)
@@ -471,7 +530,50 @@ func newCacheCmd() *cobra.Command {
 	cmd.AddCommand(newCacheInvalidateCmd())
 	cmd.AddCommand(newCacheListCmd())
 	cmd.AddCommand(newCacheShowCmd())
+	cmd.AddCommand(newCacheEvictCmd())
+	cmd.AddCommand(newCacheReindexCmd())
 	return cmd
+}
+
+// buildCacheForCLI returns a Cache attached to the configured storage
+// tiers and the SQLite index (if enabled). The returned closer should be
+// invoked on command exit to flush and close the index.
+func buildCacheForCLI(cfg *config.Config) (*cache.Cache, func(), error) {
+	store, err := buildStorage(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	idx, err := buildIndex(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	c := cache.New(store).WithIndex(idx)
+	closer := func() {
+		if idx != nil {
+			_ = idx.Close()
+		}
+	}
+	return c, closer, nil
+}
+
+// buildLocalCacheForCLI is like buildCacheForCLI but limits storage to the
+// local tier. Used by eviction so cloud tiers are never touched.
+func buildLocalCacheForCLI(cfg *config.Config) (*cache.Cache, func(), error) {
+	store, err := buildLocalStorage(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	idx, err := buildIndex(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	c := cache.New(store).WithIndex(idx)
+	closer := func() {
+		if idx != nil {
+			_ = idx.Close()
+		}
+	}
+	return c, closer, nil
 }
 
 func newCacheListCmd() *cobra.Command {
@@ -489,11 +591,11 @@ to narrow.`,
 			if err != nil {
 				return err
 			}
-			store, err := buildStorage(cfg)
+			c, closer, err := buildCacheForCLI(cfg)
 			if err != nil {
 				return err
 			}
-			c := cache.New(store)
+			defer closer()
 
 			key, _ := cmd.Flags().GetString("key")
 			url, _ := cmd.Flags().GetString("url")
@@ -539,11 +641,11 @@ or --output PATH to write the body to a file.`,
 			if err != nil {
 				return err
 			}
-			store, err := buildStorage(cfg)
+			c, closer, err := buildCacheForCLI(cfg)
 			if err != nil {
 				return err
 			}
-			c := cache.New(store)
+			defer closer()
 
 			key, _ := cmd.Flags().GetString("key")
 			url, _ := cmd.Flags().GetString("url")
@@ -575,6 +677,244 @@ or --output PATH to write the body to a file.`,
 	return cmd
 }
 
+// ---- evict ----
+
+type evictOptions struct {
+	Cache *cache.Cache
+
+	TargetSize    int64
+	TargetSizeSet bool
+	MinAge        time.Duration
+	DryRun        bool
+	JSON          bool
+
+	Stdout io.Writer
+	Stderr io.Writer
+}
+
+type evictRow struct {
+	Key      string `json:"key"`
+	Method   string `json:"method"`
+	URL      string `json:"url"`
+	BodySize int64  `json:"body_size"`
+}
+
+func runEvict(ctx context.Context, opts evictOptions) error {
+	if !opts.TargetSizeSet {
+		return errors.New("--target-size is required")
+	}
+	if opts.TargetSize < 0 {
+		return errors.New("--target-size must be >= 0")
+	}
+	if opts.MinAge < 0 {
+		return errors.New("--min-age must be >= 0")
+	}
+
+	idx := opts.Cache.Index()
+	if idx == nil {
+		return errors.New("eviction requires the SQLite index; run with the index enabled")
+	}
+
+	if err := idx.Flush(ctx); err != nil {
+		return fmt.Errorf("flushing pending hits: %w", err)
+	}
+
+	total, err := idx.TotalBodySize(ctx)
+	if err != nil {
+		return fmt.Errorf("total size: %w", err)
+	}
+	if total <= opts.TargetSize {
+		fmt.Fprintf(opts.Stderr, "nothing to evict (current=%d target=%d)\n", total, opts.TargetSize)
+		return nil
+	}
+	need := total - opts.TargetSize
+
+	cutoff := int64(0)
+	if opts.MinAge > 0 {
+		cutoff = time.Now().Add(-opts.MinAge).Unix()
+	}
+
+	candidates, err := idx.LRUEntries(ctx, cutoff, 0)
+	if err != nil {
+		return fmt.Errorf("listing LRU candidates: %w", err)
+	}
+
+	verb := "evicted"
+	if opts.DryRun {
+		verb = "would evict"
+	}
+
+	var freed int64
+	deleted := 0
+	skipped := 0
+	for _, c := range candidates {
+		if freed >= need {
+			break
+		}
+		if !opts.DryRun {
+			if err := opts.Cache.Delete(ctx, c.Key); err != nil {
+				if errors.Is(err, storage.ErrNotFound) {
+					_ = idx.Delete(ctx, c.Key) // orphan row; drop and continue
+					skipped++
+					continue
+				}
+				fmt.Fprintf(opts.Stderr, "failed to evict %s: %v\n", c.Key, err)
+				continue
+			}
+		}
+		row := evictRow{Key: c.Key, Method: c.Method, URL: c.URL, BodySize: c.BodySize}
+		if opts.JSON {
+			b, _ := json.Marshal(row)
+			fmt.Fprintln(opts.Stdout, string(b))
+		} else {
+			fmt.Fprintf(opts.Stdout, "%s %s %d %s\n", row.Key, row.Method, row.BodySize, row.URL)
+		}
+		freed += c.BodySize
+		deleted++
+	}
+
+	fmt.Fprintf(opts.Stderr, "%s %d entries (%d bytes); current=%d target=%d\n",
+		verb, deleted, freed, total-freed, opts.TargetSize)
+	if freed < need && !opts.DryRun {
+		fmt.Fprintf(opts.Stderr, "warning: did not reach target; %d bytes still over (consider lowering --min-age)\n", need-freed)
+	}
+	if skipped > 0 {
+		fmt.Fprintf(opts.Stderr, "%d orphan rows cleaned up\n", skipped)
+	}
+	return nil
+}
+
+// ---- reindex ----
+
+type reindexOptions struct {
+	Cache *cache.Cache
+
+	DryRun bool
+
+	Stdout io.Writer
+	Stderr io.Writer
+}
+
+func runReindex(ctx context.Context, opts reindexOptions) error {
+	if opts.Cache.Index() == nil {
+		return errors.New("reindex requires the SQLite index; run with the index enabled")
+	}
+
+	if opts.DryRun {
+		// Compare on-disk and indexed key sets without mutating.
+		seen := make(map[string]bool)
+		var ondiskMeta = make(map[string]*cache.EntryMeta)
+		walkErr := opts.Cache.Walk(ctx, func(key string, meta *cache.EntryMeta) error {
+			seen[key] = true
+			ondiskMeta[key] = meta
+			return nil
+		})
+		if walkErr != nil {
+			return fmt.Errorf("walk: %w", walkErr)
+		}
+		idx := opts.Cache.Index()
+		idxKeys, err := idx.AllKeys(ctx)
+		if err != nil {
+			return fmt.Errorf("index keys: %w", err)
+		}
+		idxSet := make(map[string]bool, len(idxKeys))
+		for _, k := range idxKeys {
+			idxSet[k] = true
+		}
+		var inserted, updated, removed int
+		for k := range seen {
+			if idxSet[k] {
+				updated++
+			} else {
+				inserted++
+			}
+		}
+		for _, k := range idxKeys {
+			if !seen[k] {
+				removed++
+			}
+		}
+		fmt.Fprintf(opts.Stderr, "would reindex: inserted=%d updated=%d removed=%d\n", inserted, updated, removed)
+		return nil
+	}
+
+	inserted, updated, removed, err := opts.Cache.Reindex(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(opts.Stderr, "reindexed: inserted=%d updated=%d removed=%d\n", inserted, updated, removed)
+	return nil
+}
+
+// ---- size + duration parsers ----
+
+// parseSize parses byte sizes with optional 1024-based suffixes K, M, G, T.
+// Suffixes are case-insensitive. Whole and decimal values are accepted.
+//   "1024"   → 1024
+//   "1K"     → 1024
+//   "1.5G"   → 1610612736
+func parseSize(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty size")
+	}
+	mult := int64(1)
+	last := s[len(s)-1]
+	switch last {
+	case 'K', 'k':
+		mult = 1024
+		s = s[:len(s)-1]
+	case 'M', 'm':
+		mult = 1024 * 1024
+		s = s[:len(s)-1]
+	case 'G', 'g':
+		mult = 1024 * 1024 * 1024
+		s = s[:len(s)-1]
+	case 'T', 't':
+		mult = 1024 * 1024 * 1024 * 1024
+		s = s[:len(s)-1]
+	}
+	// Accept either int or decimal.
+	if strings.Contains(s, ".") {
+		f, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid size: %s", s)
+		}
+		return int64(f * float64(mult)), nil
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size: %s", s)
+	}
+	return n * mult, nil
+}
+
+// parseAge parses durations like time.ParseDuration but additionally
+// accepts "Nd" and "Nw" suffixes (days and weeks).
+func parseAge(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty duration")
+	}
+	last := s[len(s)-1]
+	if last == 'd' || last == 'w' {
+		num := s[:len(s)-1]
+		f, err := strconv.ParseFloat(num, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid duration: %s", s)
+		}
+		var unit time.Duration
+		switch last {
+		case 'd':
+			unit = 24 * time.Hour
+		case 'w':
+			unit = 7 * 24 * time.Hour
+		}
+		return time.Duration(f * float64(unit)), nil
+	}
+	return time.ParseDuration(s)
+}
+
 // stdoutIsTTY reports whether os.Stdout refers to a character device. Used to
 // guard --body from dumping binary into an interactive terminal.
 func stdoutIsTTY() bool {
@@ -599,11 +939,11 @@ Exactly one of --key, --url, --url-prefix, --all must be supplied.
 			if err != nil {
 				return err
 			}
-			store, err := buildStorage(cfg)
+			c, closer, err := buildCacheForCLI(cfg)
 			if err != nil {
 				return err
 			}
-			c := cache.New(store)
+			defer closer()
 
 			key, _ := cmd.Flags().GetString("key")
 			url, _ := cmd.Flags().GetString("url")
@@ -631,5 +971,97 @@ Exactly one of --key, --url, --url-prefix, --all must be supplied.
 	cmd.Flags().Bool("all", false, "delete every entry")
 	cmd.Flags().String("method", "", "narrow --url/--url-prefix to a specific HTTP method")
 	cmd.Flags().Bool("dry-run", false, "print what would be deleted without deleting")
+	return cmd
+}
+
+func newCacheEvictCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "evict",
+		Short: "Evict least-recently-used local cache entries down to a target size",
+		Long: `Evict the least-recently-used entries from the local cache tier
+until total body bytes are at or below --target-size.
+
+Eviction is L1-only: cloud tiers (GCS/S3) are never touched. The
+--min-age flag protects fresh entries from being evicted on the same
+day they were written.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(cmd)
+			if err != nil {
+				return err
+			}
+			c, closer, err := buildLocalCacheForCLI(cfg)
+			if err != nil {
+				return err
+			}
+			defer closer()
+
+			targetSizeStr, _ := cmd.Flags().GetString("target-size")
+			minAgeStr, _ := cmd.Flags().GetString("min-age")
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+			jsonOut, _ := cmd.Flags().GetBool("json")
+
+			var target int64
+			if targetSizeStr != "" {
+				target, err = parseSize(targetSizeStr)
+				if err != nil {
+					return err
+				}
+			}
+			var minAge time.Duration
+			if minAgeStr != "" {
+				minAge, err = parseAge(minAgeStr)
+				if err != nil {
+					return err
+				}
+			}
+
+			return runEvict(cmd.Context(), evictOptions{
+				Cache:         c,
+				TargetSize:    target,
+				TargetSizeSet: cmd.Flags().Changed("target-size"),
+				MinAge:        minAge,
+				DryRun:        dryRun,
+				JSON:          jsonOut,
+				Stdout:        cmd.OutOrStdout(),
+				Stderr:        cmd.ErrOrStderr(),
+			})
+		},
+	}
+	cmd.Flags().String("target-size", "", "evict until total body bytes <= this value (e.g., 150G, 1.5T)")
+	cmd.Flags().String("min-age", "", "skip entries accessed more recently than this (e.g., 24h, 7d)")
+	cmd.Flags().Bool("dry-run", false, "print what would be evicted without deleting")
+	cmd.Flags().Bool("json", false, "emit one JSON object per evicted entry")
+	return cmd
+}
+
+func newCacheReindexCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "reindex",
+		Short: "Rebuild the SQLite index from on-disk cache contents",
+		Long: `Walk the local cache directory and reconcile the SQLite index:
+insert missing rows for files on disk, remove rows whose files are gone,
+and refresh meta/body_size on existing rows. Usage stats (created_at,
+last_accessed_at, hit_count) are preserved on already-indexed entries.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(cmd)
+			if err != nil {
+				return err
+			}
+			c, closer, err := buildCacheForCLI(cfg)
+			if err != nil {
+				return err
+			}
+			defer closer()
+
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+			return runReindex(cmd.Context(), reindexOptions{
+				Cache:  c,
+				DryRun: dryRun,
+				Stdout: cmd.OutOrStdout(),
+				Stderr: cmd.ErrOrStderr(),
+			})
+		},
+	}
+	cmd.Flags().Bool("dry-run", false, "report what would change without modifying the index")
 	return cmd
 }

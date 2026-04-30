@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/loopingz/escrow-proxy/internal/archive"
 	"github.com/loopingz/escrow-proxy/internal/cache"
 	"github.com/loopingz/escrow-proxy/internal/config"
+	"github.com/loopingz/escrow-proxy/internal/index"
 	"github.com/loopingz/escrow-proxy/internal/proxy"
 	"github.com/loopingz/escrow-proxy/internal/storage"
 	tlspkg "github.com/loopingz/escrow-proxy/internal/tls"
@@ -52,6 +54,8 @@ func main() {
 	rootCmd.PersistentFlags().String("s3-prefix", "", "S3 key prefix")
 	rootCmd.PersistentFlags().String("s3-region", "", "S3 region")
 	rootCmd.PersistentFlags().Duration("upstream-timeout", 30*time.Second, "upstream request timeout")
+	rootCmd.PersistentFlags().String("index-db", "", "path to local SQLite index DB (default: <local-dir>/index.db)")
+	rootCmd.PersistentFlags().Bool("no-index", false, "disable the SQLite index entirely")
 
 	rootCmd.AddCommand(newServeCmd())
 	rootCmd.AddCommand(newRecordCmd())
@@ -150,8 +154,84 @@ func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 			}
 		}
 	}
+	if cmd.Flags().Changed("index-db") {
+		path, _ := cmd.Flags().GetString("index-db")
+		cfg.Cache.Index.Path = path
+	}
+	if cmd.Flags().Changed("no-index") {
+		disabled, _ := cmd.Flags().GetBool("no-index")
+		enabled := !disabled
+		cfg.Cache.Index.Enabled = &enabled
+	}
 
 	return cfg, nil
+}
+
+// indexEnabled returns whether the index should be opened. Defaults to
+// true when the config doesn't say otherwise.
+func indexEnabled(cfg *config.Config) bool {
+	if cfg.Cache.Index.Enabled == nil {
+		return true
+	}
+	return *cfg.Cache.Index.Enabled
+}
+
+// indexPath resolves the SQLite DB path. Defaults to <local-dir>/index.db
+// where <local-dir> is the first local storage tier's Dir.
+func indexPath(cfg *config.Config) (string, error) {
+	if cfg.Cache.Index.Path != "" {
+		return cfg.Cache.Index.Path, nil
+	}
+	for _, t := range cfg.Storage.Tiers {
+		if t.Type == "local" {
+			dir := t.Dir
+			if dir == "" {
+				homeDir, _ := os.UserHomeDir()
+				dir = filepath.Join(homeDir, ".escrow-proxy", "cache")
+			}
+			return filepath.Join(dir, "index.db"), nil
+		}
+	}
+	return "", fmt.Errorf("index requires a local storage tier; configure --storage local or pass --index-db PATH")
+}
+
+// buildIndex opens the SQLite index (creating the DB and dirs as needed).
+// Returns nil if the index is disabled via config or --no-index.
+func buildIndex(cfg *config.Config) (*index.Index, error) {
+	if !indexEnabled(cfg) {
+		return nil, nil
+	}
+	path, err := indexPath(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, fmt.Errorf("creating index dir: %w", err)
+	}
+	return index.Open(path, index.Options{
+		FlushInterval:  cfg.Cache.Index.FlushInterval,
+		FlushThreshold: cfg.Cache.Index.FlushThreshold,
+	})
+}
+
+// buildLocalStorage returns a Storage backed by only the local tier of
+// cfg.Storage.Tiers. Used by eviction so cloud tiers are never touched.
+func buildLocalStorage(cfg *config.Config) (storage.Storage, error) {
+	for _, t := range cfg.Storage.Tiers {
+		if t.Type != "local" {
+			continue
+		}
+		dir := t.Dir
+		if dir == "" {
+			homeDir, _ := os.UserHomeDir()
+			dir = filepath.Join(homeDir, ".escrow-proxy", "cache")
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("creating local storage dir: %w", err)
+		}
+		return storage.NewLocal(dir), nil
+	}
+	return nil, fmt.Errorf("no local storage tier configured")
 }
 
 // compileExcludes turns the configured regex strings into compiled patterns.
@@ -283,7 +363,30 @@ func newServeCmd() *cobra.Command {
 				return err
 			}
 
-			c := cache.New(store)
+			idx, err := buildIndex(cfg)
+			if err != nil {
+				return err
+			}
+
+			c := cache.New(store).WithIndex(idx)
+
+			// Auto-reindex on first boot when storage has entries but the
+			// index is empty.
+			if idx != nil {
+				if n, err := idx.Count(cmd.Context()); err == nil && n == 0 {
+					empty, _ := storageHasNoEntries(cmd.Context(), c)
+					if !empty {
+						logger := setupLogger(cfg.LogLevel)
+						logger.Info("auto-reindex: index is empty but cache has entries; rebuilding")
+						if ins, upd, rem, err := c.Reindex(cmd.Context()); err != nil {
+							logger.Warn("auto-reindex failed; run `cache reindex`", "error", err)
+						} else {
+							logger.Info("auto-reindex complete", "inserted", ins, "updated", upd, "removed", rem)
+						}
+					}
+				}
+			}
+
 			certCache := tlspkg.NewCertCache(ca, 1000)
 
 			excludes, err := compileExcludes(cfg.Cache.ExcludePatterns)
@@ -303,11 +406,31 @@ func newServeCmd() *cobra.Command {
 				Logger:          logger,
 			})
 
-			startProxy(handler, cfg.Listen, logger, nil)
+			startProxy(handler, cfg.Listen, logger, func() {
+				if idx != nil {
+					_ = idx.Close()
+				}
+			})
 			return nil
 		},
 	}
 }
+
+// storageHasNoEntries reports whether the cache has no .meta entries.
+// Used by serve startup to skip auto-reindex on a fresh deploy.
+func storageHasNoEntries(ctx context.Context, c *cache.Cache) (bool, error) {
+	empty := true
+	err := c.Walk(ctx, func(string, *cache.EntryMeta) error {
+		empty = false
+		return errFirstEntryFound
+	})
+	if err != nil && !errors.Is(err, errFirstEntryFound) {
+		return false, err
+	}
+	return empty, nil
+}
+
+var errFirstEntryFound = fmt.Errorf("found one")
 
 func newRecordCmd() *cobra.Command {
 	cmd := &cobra.Command{

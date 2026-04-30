@@ -6,11 +6,27 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/loopingz/escrow-proxy/internal/cache"
+	"github.com/loopingz/escrow-proxy/internal/index"
 	"github.com/loopingz/escrow-proxy/internal/storage"
 )
+
+func newTestIndex(t *testing.T) *index.Index {
+	t.Helper()
+	idx, err := index.Open(filepath.Join(t.TempDir(), "index.db"), index.Options{
+		FlushInterval:  100 * time.Millisecond,
+		FlushThreshold: 1000,
+	})
+	if err != nil {
+		t.Fatalf("Open index: %v", err)
+	}
+	t.Cleanup(func() { idx.Close() })
+	return idx
+}
 
 func TestCache_PutAndGet(t *testing.T) {
 	s := storage.NewLocal(t.TempDir())
@@ -236,6 +252,182 @@ func TestCache_Walk_PropagatesFnError(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("expected walk to stop after 1 call, got %d", calls)
+	}
+}
+
+func TestCache_WithIndex_PutInsertsRow(t *testing.T) {
+	idx := newTestIndex(t)
+	c := cache.New(storage.NewLocal(t.TempDir())).WithIndex(idx)
+	ctx := context.Background()
+
+	meta := &cache.EntryMeta{Method: "GET", URL: "https://example.com/x", StatusCode: 200}
+	if err := c.Put(ctx, "k", meta, bytes.NewReader([]byte("hello"))); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	got, err := idx.Get(ctx, "k")
+	if err != nil {
+		t.Fatalf("Index.Get: %v", err)
+	}
+	if got.URL != meta.URL || got.Method != "GET" || got.Status != 200 {
+		t.Fatalf("wrong row: %+v", got)
+	}
+	if got.BodySize != 5 {
+		t.Fatalf("wrong body_size: got %d, want 5", got.BodySize)
+	}
+}
+
+func TestCache_WithIndex_GetRecordsHit(t *testing.T) {
+	idx := newTestIndex(t)
+	c := cache.New(storage.NewLocal(t.TempDir())).WithIndex(idx)
+	ctx := context.Background()
+
+	meta := &cache.EntryMeta{Method: "GET", URL: "u", StatusCode: 200}
+	c.Put(ctx, "k", meta, bytes.NewReader([]byte("body")))
+
+	_, body, err := c.Get(ctx, "k")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	body.Close()
+
+	if err := idx.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	got, _ := idx.Get(ctx, "k")
+	if got.HitCount < 1 {
+		t.Fatalf("expected hit_count >= 1, got %d", got.HitCount)
+	}
+}
+
+func TestCache_WithIndex_GetMissDeletesOrphanRow(t *testing.T) {
+	idx := newTestIndex(t)
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store).WithIndex(idx)
+	ctx := context.Background()
+
+	// Inject an orphan row directly into the index without writing to storage.
+	if err := idx.Insert(ctx, index.Entry{
+		Key: "ghost", Method: "GET", URL: "u", Status: 200, BodySize: 1,
+		CreatedAt: 1, LastAccessedAt: 1,
+	}); err != nil {
+		t.Fatalf("Insert orphan: %v", err)
+	}
+
+	_, _, err := c.Get(ctx, "ghost")
+	if err == nil {
+		t.Fatal("expected miss")
+	}
+
+	_, getErr := idx.Get(ctx, "ghost")
+	if !errors.Is(getErr, storage.ErrNotFound) {
+		t.Fatalf("orphan row should be deleted; Index.Get err = %v", getErr)
+	}
+}
+
+func TestCache_WithIndex_GetReconcilesMissingRow(t *testing.T) {
+	idx := newTestIndex(t)
+	c := cache.New(storage.NewLocal(t.TempDir())).WithIndex(idx)
+	ctx := context.Background()
+
+	meta := &cache.EntryMeta{Method: "GET", URL: "u", StatusCode: 200}
+	c.Put(ctx, "k", meta, bytes.NewReader([]byte("body")))
+
+	// Drop the row to simulate post-Put drift (e.g., DB rebuilt from disk).
+	if err := idx.Delete(ctx, "k"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	_, body, err := c.Get(ctx, "k")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	body.Close()
+
+	// Flush forces RecordHit's buffered upsert to land in SQL.
+	if err := idx.Flush(ctx); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	got, err := idx.Get(ctx, "k")
+	if err != nil {
+		t.Fatalf("expected reconciled row, got %v", err)
+	}
+	if got.URL != meta.URL || got.HitCount < 1 {
+		t.Fatalf("reconciled row wrong: %+v", got)
+	}
+}
+
+func TestCache_WithIndex_DeleteRemovesRow(t *testing.T) {
+	idx := newTestIndex(t)
+	c := cache.New(storage.NewLocal(t.TempDir())).WithIndex(idx)
+	ctx := context.Background()
+
+	meta := &cache.EntryMeta{Method: "GET", URL: "u", StatusCode: 200}
+	c.Put(ctx, "k", meta, bytes.NewReader([]byte("body")))
+
+	if err := c.Delete(ctx, "k"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	_, err := idx.Get(ctx, "k")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("index row should be gone, got %v", err)
+	}
+}
+
+func TestCache_Reindex_InsertUpdateRemove(t *testing.T) {
+	idx := newTestIndex(t)
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store).WithIndex(idx)
+	ctx := context.Background()
+
+	// 1) on disk + in index → updated
+	meta1 := &cache.EntryMeta{Method: "GET", URL: "u1", StatusCode: 200}
+	if err := c.Put(ctx, "indexed", meta1, bytes.NewReader([]byte("body1"))); err != nil {
+		t.Fatalf("Put indexed: %v", err)
+	}
+	// Bump usage stats so we can verify they're preserved.
+	idx.Insert(ctx, index.Entry{Key: "indexed", Method: "GET", URL: "u1", Status: 200, BodySize: 5, CreatedAt: 1, LastAccessedAt: 999, HitCount: 42})
+
+	// 2) on disk only (orphan file, no index row) → inserted
+	meta2 := &cache.EntryMeta{Method: "POST", URL: "u2", StatusCode: 201}
+	metaBytes, _ := cache.MarshalMeta(meta2)
+	store.Put(ctx, "ondisk.meta", bytes.NewReader(metaBytes))
+	store.Put(ctx, "ondisk.body", bytes.NewReader([]byte("body2")))
+
+	// 3) in index only (no file) → removed
+	idx.Insert(ctx, index.Entry{Key: "ghost", Method: "GET", URL: "u3", Status: 200, BodySize: 99, CreatedAt: 1, LastAccessedAt: 1})
+
+	inserted, updated, removed, err := c.Reindex(ctx)
+	if err != nil {
+		t.Fatalf("Reindex: %v", err)
+	}
+	if inserted != 1 || updated != 1 || removed != 1 {
+		t.Fatalf("counts: inserted=%d updated=%d removed=%d", inserted, updated, removed)
+	}
+
+	// Updated row preserved usage stats.
+	got, _ := idx.Get(ctx, "indexed")
+	if got.HitCount != 42 || got.LastAccessedAt != 999 || got.CreatedAt != 1 {
+		t.Fatalf("stats not preserved: %+v", got)
+	}
+
+	// Inserted row exists.
+	if _, err := idx.Get(ctx, "ondisk"); err != nil {
+		t.Fatalf("expected ondisk reindexed: %v", err)
+	}
+
+	// Orphan removed.
+	_, err = idx.Get(ctx, "ghost")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected ghost removed, got %v", err)
+	}
+}
+
+func TestCache_Reindex_NoIndexErrors(t *testing.T) {
+	c := cache.New(storage.NewLocal(t.TempDir()))
+	_, _, _, err := c.Reindex(context.Background())
+	if err == nil {
+		t.Fatal("expected error when no index attached")
 	}
 }
 
