@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/loopingz/escrow-proxy/compare/v0.5.0...v0.6.0) (2026-05-04)
+
+
+### Features
+
+* **cli:** read --config and --log-level from env vars ([#10](https://github.com/loopingz/escrow-proxy/issues/10)) ([93a1d0c](https://github.com/loopingz/escrow-proxy/commit/93a1d0c2ad0fd9944847df91d3836b5b556d304d))
+
 ## [0.5.0](https://github.com/loopingz/escrow-proxy/compare/v0.4.0...v0.5.0) (2026-04-30)
 
 
