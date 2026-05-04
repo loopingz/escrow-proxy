@@ -412,11 +412,11 @@ CLI flags override config file values.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--config` | | Path to YAML config file |
+| `--config` | `$ESCROW_PROXY_CONFIG` | Path to YAML config file |
 | `--listen` / `-l` | `:8080` | Bind address |
 | `--ca-cert` / `--ca-key` | | Custom CA certificate and key paths |
 | `--cache-key-headers` | `Accept,Accept-Encoding` | Headers included in cache key |
-| `--log-level` | `info` | Log level: `debug`, `info`, `warn`, `error` |
+| `--log-level` | `info` (or `$ESCROW_PROXY_LOG_LEVEL`) | Log level: `debug`, `info`, `warn`, `error` |
 | `--upstream-timeout` | `30s` | Timeout for upstream requests |
 
 #### Storage Flags

@@ -40,12 +40,12 @@ func main() {
 	}
 	rootCmd.SetVersionTemplate("{{.Version}}\n")
 
-	rootCmd.PersistentFlags().String("config", "", "path to config file (YAML)")
+	rootCmd.PersistentFlags().String("config", "", "path to config file (YAML); falls back to $ESCROW_PROXY_CONFIG")
 	rootCmd.PersistentFlags().StringP("listen", "l", ":8080", "bind address")
 	rootCmd.PersistentFlags().String("ca-cert", "", "path to CA certificate")
 	rootCmd.PersistentFlags().String("ca-key", "", "path to CA private key")
 	rootCmd.PersistentFlags().String("cache-key-headers", "Accept,Accept-Encoding", "headers to include in cache key")
-	rootCmd.PersistentFlags().String("log-level", "info", "log level: debug, info, warn, error")
+	rootCmd.PersistentFlags().String("log-level", "info", "log level: debug, info, warn, error; falls back to $ESCROW_PROXY_LOG_LEVEL")
 	rootCmd.PersistentFlags().String("storage", "local", "comma-separated storage tier list (e.g., local,gcs)")
 	rootCmd.PersistentFlags().String("local-dir", "", "local cache directory (default: ~/.escrow-proxy/cache/)")
 	rootCmd.PersistentFlags().String("gcs-bucket", "", "GCS bucket name")
@@ -72,6 +72,9 @@ func main() {
 // loadConfig loads the YAML config file (if any) and applies CLI flag overrides.
 func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 	cfgPath, _ := cmd.Flags().GetString("config")
+	if cfgPath == "" {
+		cfgPath = os.Getenv("ESCROW_PROXY_CONFIG")
+	}
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return nil, err
@@ -92,6 +95,8 @@ func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 	}
 	if cmd.Flags().Changed("log-level") {
 		cfg.LogLevel, _ = cmd.Flags().GetString("log-level")
+	} else if v := os.Getenv("ESCROW_PROXY_LOG_LEVEL"); v != "" {
+		cfg.LogLevel = v
 	}
 	if cmd.Flags().Changed("upstream-timeout") {
 		cfg.UpstreamTimeout, _ = cmd.Flags().GetDuration("upstream-timeout")

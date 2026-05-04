@@ -10,6 +10,14 @@ Pass a config file with `--config`:
 escrow-proxy serve --config /etc/escrow-proxy/config.yaml
 ```
 
+If `--config` is not set, the path is read from the `ESCROW_PROXY_CONFIG`
+environment variable:
+
+```bash
+export ESCROW_PROXY_CONFIG=/etc/escrow-proxy/config.yaml
+escrow-proxy serve
+```
+
 ### Full Example
 
 ```yaml
