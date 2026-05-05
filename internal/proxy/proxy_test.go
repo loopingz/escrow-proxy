@@ -505,6 +505,73 @@ func TestProxy_OfflineMode_BypassedMethodReturns502(t *testing.T) {
 	}
 }
 
+func TestProxy_FollowsRedirectAndCachesFinalBody(t *testing.T) {
+	var (
+		redirectCount int
+		finalCount    int
+		upstream      *httptest.Server
+	)
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/redirect":
+			redirectCount++
+			http.Redirect(w, r, upstream.URL+"/final", http.StatusFound)
+		case "/final":
+			finalCount++
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Write([]byte("blob"))
+		default:
+			t.Errorf("unexpected upstream path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+	_, client := setupProxy(t, proxy.ModeServe, c)
+
+	// Disable client-side redirect-following so we can observe what the
+	// proxy itself returned (200 means proxy followed; 302 means it didn't).
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	// First request: proxy follows the redirect upstream and caches /redirect.
+	resp1, err := client.Get(upstream.URL + "/redirect")
+	if err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	body1, _ := io.ReadAll(resp1.Body)
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("first request status: got %d, want 200 (proxy did not follow redirect)", resp1.StatusCode)
+	}
+	if string(body1) != "blob" {
+		t.Fatalf("first body: got %q, want %q", body1, "blob")
+	}
+	if redirectCount != 1 || finalCount != 1 {
+		t.Fatalf("upstream calls after first request: got redirect=%d final=%d, want 1/1", redirectCount, finalCount)
+	}
+
+	// Second request: served from cache for the ORIGINAL URL — no upstream calls.
+	resp2, err := client.Get(upstream.URL + "/redirect")
+	if err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("second request status: got %d, want 200", resp2.StatusCode)
+	}
+	if string(body2) != "blob" {
+		t.Fatalf("cached body: got %q, want %q", body2, "blob")
+	}
+	if redirectCount != 1 || finalCount != 1 {
+		t.Fatalf("upstream calls after cache hit: got redirect=%d final=%d, want 1/1 (cache miss)", redirectCount, finalCount)
+	}
+}
+
 func TestProxy_PreservesResponseHeaders(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
