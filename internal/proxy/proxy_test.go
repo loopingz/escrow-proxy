@@ -711,6 +711,48 @@ func TestProxy_StripsAuthHeaderOnCrossHostRedirect(t *testing.T) {
 	}
 }
 
+func TestProxy_TooManyRedirectsReturns500(t *testing.T) {
+	var upstream *httptest.Server
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Self-loop: every path redirects to /loop.
+		http.Redirect(w, r, upstream.URL+"/loop", http.StatusFound)
+	}))
+	defer upstream.Close()
+
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+	_, client := setupProxy(t, proxy.ModeServe, c)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp, err := client.Get(upstream.URL + "/start")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status: got %d, want 500", resp.StatusCode)
+	}
+
+	// Cache must remain empty: no entry was written for /start.
+	_, _, err = c.Get(t.Context(), proxy.ComputeCacheKey(mustReq(t, "GET", upstream.URL+"/start"), nil))
+	if err == nil {
+		t.Fatalf("cache should be empty for failed redirect chain, but got an entry")
+	}
+}
+
+// mustReq builds an *http.Request for cache-key computation in tests.
+func mustReq(t *testing.T, method, url string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(method, url, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	return req
+}
+
 func TestProxy_PreservesResponseHeaders(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
