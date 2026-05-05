@@ -797,6 +797,82 @@ func TestProxy_RedirectChainEndingIn404NotCached(t *testing.T) {
 	}
 }
 
+func TestProxy_OfflineMode_ServesCachedFinalBodyForRedirect(t *testing.T) {
+	var (
+		redirectCount, finalCount int
+		upstream                  *httptest.Server
+	)
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/pkg":
+			redirectCount++
+			http.Redirect(w, r, upstream.URL+"/blob", http.StatusFound)
+		case "/blob":
+			finalCount++
+			w.Write([]byte("recorded-blob"))
+		default:
+			t.Errorf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+
+	dir := t.TempDir()
+
+	// --- Phase 1: serve mode populates the cache via a redirect chain ---
+	store1 := storage.NewLocal(dir)
+	c1 := cache.New(store1)
+	_, client1 := setupProxy(t, proxy.ModeServe, c1)
+	client1.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp, err := client1.Get(upstream.URL + "/pkg")
+	if err != nil {
+		t.Fatalf("populate: %v", err)
+	}
+	if string(mustReadAll(t, resp.Body)) != "recorded-blob" {
+		t.Fatalf("populate body wrong")
+	}
+	resp.Body.Close()
+
+	if redirectCount != 1 || finalCount != 1 {
+		t.Fatalf("populate phase: got redirect=%d final=%d, want 1/1", redirectCount, finalCount)
+	}
+
+	// --- Phase 2: shut down upstream and verify offline mode serves the original URL ---
+	upstreamURL := upstream.URL
+	upstream.Close()
+
+	store2 := storage.NewLocal(dir)
+	c2 := cache.New(store2)
+	_, client2 := setupProxy(t, proxy.ModeOffline, c2)
+	client2.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp2, err := client2.Get(upstreamURL + "/pkg")
+	if err != nil {
+		t.Fatalf("offline request: %v", err)
+	}
+	body, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("offline status: got %d, want 200", resp2.StatusCode)
+	}
+	if string(body) != "recorded-blob" {
+		t.Fatalf("offline body: got %q, want %q", body, "recorded-blob")
+	}
+}
+
+func mustReadAll(t *testing.T, r io.Reader) []byte {
+	t.Helper()
+	b, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	return b
+}
+
 func TestProxy_PreservesResponseHeaders(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
