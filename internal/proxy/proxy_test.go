@@ -753,6 +753,50 @@ func mustReq(t *testing.T, method, url string) *http.Request {
 	return req
 }
 
+func TestProxy_RedirectChainEndingIn404NotCached(t *testing.T) {
+	var (
+		redirectCount, missingCount int
+		upstream                    *httptest.Server
+	)
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/start":
+			redirectCount++
+			http.Redirect(w, r, upstream.URL+"/missing", http.StatusFound)
+		case "/missing":
+			missingCount++
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte("not found"))
+		default:
+			t.Errorf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+	_, client := setupProxy(t, proxy.ModeServe, c)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	for i := 0; i < 2; i++ {
+		resp, err := client.Get(upstream.URL + "/start")
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("request %d status: got %d, want 404", i, resp.StatusCode)
+		}
+		io.ReadAll(resp.Body)
+		resp.Body.Close()
+	}
+
+	if redirectCount != 2 || missingCount != 2 {
+		t.Fatalf("upstream calls: got redirect=%d missing=%d, want 2/2 (4xx not cached)", redirectCount, missingCount)
+	}
+}
+
 func TestProxy_PreservesResponseHeaders(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
