@@ -48,7 +48,14 @@ body under the original URL's key.
 - Honoring `Cache-Control` directives on intermediate redirects.
 - Special handling for `304 Not Modified` (it is not a redirect; today's
   behavior is preserved).
-- Per-hop timeouts. The existing `UpstreamTimeout` covers the whole chain.
+- Wiring up `UpstreamTimeout`. The field is currently configured in
+  `Config` and stored in the handler but is not applied anywhere. This
+  fix preserves that gap rather than silently turning it on — applying
+  `UpstreamTimeout` as a whole-request timeout (e.g., via
+  `http.Client.Timeout`) would cover body reads and break large
+  downloads on the 30-second default. A separate change should decide
+  what kind of timeout (dial, response-header, idle, total) is correct
+  and apply it intentionally.
 
 ## Scope of redirect codes followed
 
@@ -122,7 +129,6 @@ Specifics that follow from this:
 | Relative `Location` (`/v2/foo`) or scheme-relative (`//host/foo`) | Resolved by `http.Client` against the previous request's URL. |
 | Malformed `Location` | Parse error from `http.Client.Do`. 502 to client, nothing cached. |
 | Cross-host hop carrying `Authorization` / `Cookie` | Stripped by `http.Client` before the next hop (stdlib default). |
-| `UpstreamTimeout` mid-chain | Applied as `http.Client.Timeout` so it covers the whole chain end-to-end. Timeout → 502, nothing cached. |
 | Client cancels mid-chain | `req.Context()` is propagated to `client.Do`; cancellation aborts the chain. |
 | `304 Not Modified` | Not a redirect — passes through unchanged. No behavior change. |
 
@@ -154,7 +160,7 @@ proxy-level tests above exercise the full path.
 
 - `internal/proxy/transport.go` — new file: `redirectFollower` type.
 - `internal/proxy/proxy.go` — wire `proxy.Tr` to a `redirectFollower`
-  configured with the `UpstreamTimeout` from `Config`.
+  wrapping `http.DefaultTransport`.
 - `internal/proxy/proxy_test.go` — new tests listed above.
 - `README.md` — short note in the request-flow section that the proxy
   follows upstream redirects and caches the terminal body under the
