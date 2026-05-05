@@ -665,6 +665,52 @@ func TestProxy_FollowsRedirectsAcrossHosts(t *testing.T) {
 	}
 }
 
+func TestProxy_StripsAuthHeaderOnCrossHostRedirect(t *testing.T) {
+	var (
+		gotAuthAtTarget string
+		gotAuthAtOrigin string
+	)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthAtTarget = r.Header.Get("Authorization")
+		w.Write([]byte("ok"))
+	}))
+	defer target.Close()
+
+	// Rewrite target.URL host (127.0.0.1) to localhost so stdlib sees a
+	// different hostname string and triggers cross-host header stripping.
+	// Both still resolve to the same loopback IP.
+	targetViaLocalhost := strings.Replace(target.URL, "127.0.0.1", "localhost", 1)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthAtOrigin = r.Header.Get("Authorization")
+		http.Redirect(w, r, targetViaLocalhost+"/x", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+	_, client := setupProxy(t, proxy.ModeServe, c)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	req, _ := http.NewRequest("GET", origin.URL+"/start", nil)
+	req.Header.Set("Authorization", "Bearer s3cret")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if gotAuthAtOrigin != "Bearer s3cret" {
+		t.Fatalf("origin Authorization: got %q, want %q (header should reach origin)", gotAuthAtOrigin, "Bearer s3cret")
+	}
+	if gotAuthAtTarget != "" {
+		t.Fatalf("target Authorization: got %q, want empty (stdlib should strip across hosts)", gotAuthAtTarget)
+	}
+}
+
 func TestProxy_PreservesResponseHeaders(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
