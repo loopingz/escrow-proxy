@@ -619,6 +619,52 @@ func TestProxy_FollowsMultiHopRedirect(t *testing.T) {
 	}
 }
 
+func TestProxy_FollowsRedirectsAcrossHosts(t *testing.T) {
+	finalCount := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		finalCount++
+		w.Write([]byte("cross-host-payload"))
+	}))
+	defer target.Close()
+
+	originCount := 0
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originCount++
+		http.Redirect(w, r, target.URL+"/blob", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+	_, client := setupProxy(t, proxy.ModeServe, c)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp1, err := client.Get(origin.URL + "/pkg")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	body1, _ := io.ReadAll(resp1.Body)
+	resp1.Body.Close()
+	if string(body1) != "cross-host-payload" {
+		t.Fatalf("body: got %q, want %q", body1, "cross-host-payload")
+	}
+	if originCount != 1 || finalCount != 1 {
+		t.Fatalf("first request: origin=%d final=%d, want 1/1", originCount, finalCount)
+	}
+
+	resp2, err := client.Get(origin.URL + "/pkg")
+	if err != nil {
+		t.Fatalf("request2: %v", err)
+	}
+	io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if originCount != 1 || finalCount != 1 {
+		t.Fatalf("after cache hit: origin=%d final=%d, want 1/1 (no new calls)", originCount, finalCount)
+	}
+}
+
 func TestProxy_PreservesResponseHeaders(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
