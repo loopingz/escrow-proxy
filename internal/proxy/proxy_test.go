@@ -572,6 +572,53 @@ func TestProxy_FollowsRedirectAndCachesFinalBody(t *testing.T) {
 	}
 }
 
+func TestProxy_FollowsMultiHopRedirect(t *testing.T) {
+	var (
+		hop1, hop2, finalCount int
+		upstream               *httptest.Server
+	)
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/a":
+			hop1++
+			http.Redirect(w, r, upstream.URL+"/b", http.StatusFound)
+		case "/b":
+			hop2++
+			http.Redirect(w, r, upstream.URL+"/final", http.StatusMovedPermanently)
+		case "/final":
+			finalCount++
+			w.Write([]byte("two-hops"))
+		default:
+			t.Errorf("unexpected upstream path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+	_, client := setupProxy(t, proxy.ModeServe, c)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp, err := client.Get(upstream.URL + "/a")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+	if string(body) != "two-hops" {
+		t.Fatalf("body: got %q, want %q", body, "two-hops")
+	}
+	if hop1 != 1 || hop2 != 1 || finalCount != 1 {
+		t.Fatalf("upstream calls: got hop1=%d hop2=%d final=%d, want 1/1/1", hop1, hop2, finalCount)
+	}
+}
+
 func TestProxy_PreservesResponseHeaders(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
