@@ -466,17 +466,25 @@ git commit -m "test(proxy): verify Authorization stripped on cross-host redirect
 
 ---
 
-## Task 5: Too-many-redirects returns 502
+## Task 5: Too-many-redirects returns 5xx and is not cached
 
 **Files:**
-- Test: `internal/proxy/proxy_test.go` (new test `TestProxy_TooManyRedirectsReturns502`)
+- Test: `internal/proxy/proxy_test.go` (new test `TestProxy_TooManyRedirectsReturns500`)
+
+> **Note on status code:** goproxy 1.8.x renders RoundTrip errors as
+> `http.StatusInternalServerError` (500), not 502 (see
+> `goproxy/http.go:50`). The test asserts 500. The test also indirectly
+> verifies the production fix that `redirectFollower.RoundTrip` drops the
+> leaked 302 response when `http.Client.Do` returns an error — without
+> that fix, the proxy would silently return the last 302 to the client
+> instead of erroring.
 
 - [ ] **Step 1: Write the test**
 
 Append to `internal/proxy/proxy_test.go`:
 
 ```go
-func TestProxy_TooManyRedirectsReturns502(t *testing.T) {
+func TestProxy_TooManyRedirectsReturns500(t *testing.T) {
 	var upstream *httptest.Server
 	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Self-loop: every path redirects to /loop.
@@ -497,8 +505,8 @@ func TestProxy_TooManyRedirectsReturns502(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("status: got %d, want 502", resp.StatusCode)
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status: got %d, want 500", resp.StatusCode)
 	}
 
 	// Cache must remain empty: no entry was written for /start.
@@ -523,15 +531,15 @@ Note: this task introduces a `mustReq` helper. If `proxy_test.go` already has a 
 
 - [ ] **Step 2: Run the test**
 
-Run: `go test ./internal/proxy/ -run TestProxy_TooManyRedirectsReturns502 -v`
+Run: `go test ./internal/proxy/ -run TestProxy_TooManyRedirectsReturns500 -v`
 
-Expected: PASS. (`http.Client` returns "stopped after 10 redirects"; goproxy renders RoundTrip errors as 502 to the client.)
+Expected: PASS. `http.Client` returns "stopped after 10 redirects" alongside the last 302 response; `redirectFollower.RoundTrip` drops the leaked response so goproxy takes its error path and returns 500 (`goproxy/http.go:50` calls `http.Error(w, ..., http.StatusInternalServerError)`).
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add internal/proxy/proxy_test.go
-git commit -m "test(proxy): redirect loop returns 502 and is not cached"
+git commit -m "test(proxy): redirect loop returns 5xx and is not cached"
 ```
 
 ---

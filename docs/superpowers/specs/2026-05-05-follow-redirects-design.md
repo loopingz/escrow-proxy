@@ -127,12 +127,12 @@ Specifics that follow from this:
 
 | Situation | Behavior |
 |---|---|
-| Chain exceeds 10 hops | `http.Client` returns "stopped after 10 redirects". `redirectFollower.RoundTrip` returns the error. goproxy renders it as 502 to the client. Nothing cached. |
+| Chain exceeds 10 hops | `http.Client` returns "stopped after 10 redirects" along with the last 302 response. `redirectFollower.RoundTrip` drops the leaked response and returns just the error, so goproxy takes its error path and renders it as 500 to the client. Nothing cached. |
 | Redirect loop | Caught by the 10-hop limit. Same as above. |
-| Redirect target unreachable / DNS failure / TLS error | `http.Client.Do` returns the underlying error. 502 to client. Nothing cached. |
+| Redirect target unreachable / DNS failure / TLS error | `http.Client.Do` returns the underlying error. 500 to client. Nothing cached. |
 | Final response is 4xx/5xx | Existing `HandleResponse` guard skips caching. Client gets the error verbatim. |
 | Relative `Location` (`/v2/foo`) or scheme-relative (`//host/foo`) | Resolved by `http.Client` against the previous request's URL. |
-| Malformed `Location` | Parse error from `http.Client.Do`. 502 to client, nothing cached. |
+| Malformed `Location` | Parse error from `http.Client.Do`. 500 to client, nothing cached. |
 | Cross-host hop carrying `Authorization` / `Cookie` | Stripped by `http.Client` before the next hop (stdlib default). |
 | Client cancels mid-chain | `req.Context()` is propagated to `client.Do`; cancellation aborts the chain. |
 | `304 Not Modified` | Not a redirect — passes through unchanged. No behavior change. |

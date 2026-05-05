@@ -34,6 +34,15 @@ func newRedirectFollower(base http.RoundTripper) *redirectFollower {
 
 // RoundTrip implements goproxy.RoundTripper. The ctx parameter is unused; the
 // redirect chain is fully internal to http.Client.Do.
+//
+// On error, http.Client.Do may return both a non-nil response (the last hop in
+// the chain, e.g. the final 302 in a redirect loop) and a non-nil error. We
+// drop the response so goproxy takes its error path; otherwise the leaked 302
+// would be passed through to the client and the failure would be silent.
 func (r *redirectFollower) RoundTrip(req *http.Request, _ *goproxy.ProxyCtx) (*http.Response, error) {
-	return r.client.Do(req)
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
