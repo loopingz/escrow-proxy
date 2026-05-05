@@ -395,6 +395,8 @@ git commit -m "test(proxy): cover cross-host redirect with origin URL as cache k
 **Files:**
 - Test: `internal/proxy/proxy_test.go` (new test `TestProxy_StripsAuthHeaderOnCrossHostRedirect`)
 
+> **Note on test setup:** Stdlib's `shouldCopyHeaderOnRedirect` compares hostname strings (not IPs), so two `httptest.NewServer` instances on `127.0.0.1:PORT1` and `127.0.0.1:PORT2` are treated as the *same* host and do not trigger stripping. To force a genuine cross-host hop on a single loopback machine, the redirect's `Location` rewrites `127.0.0.1` to `localhost` (same IP, different hostname string).
+
 - [ ] **Step 1: Write the test**
 
 Append to `internal/proxy/proxy_test.go`:
@@ -411,9 +413,14 @@ func TestProxy_StripsAuthHeaderOnCrossHostRedirect(t *testing.T) {
 	}))
 	defer target.Close()
 
+	// Rewrite target.URL host (127.0.0.1) to localhost so stdlib sees a
+	// different hostname string and triggers cross-host header stripping.
+	// Both still resolve to the same loopback IP.
+	targetViaLocalhost := strings.Replace(target.URL, "127.0.0.1", "localhost", 1)
+
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuthAtOrigin = r.Header.Get("Authorization")
-		http.Redirect(w, r, target.URL+"/x", http.StatusFound)
+		http.Redirect(w, r, targetViaLocalhost+"/x", http.StatusFound)
 	}))
 	defer origin.Close()
 
@@ -442,11 +449,13 @@ func TestProxy_StripsAuthHeaderOnCrossHostRedirect(t *testing.T) {
 }
 ```
 
+`strings` is already imported in this test file.
+
 - [ ] **Step 2: Run the test**
 
 Run: `go test ./internal/proxy/ -run TestProxy_StripsAuthHeaderOnCrossHostRedirect -v`
 
-Expected: PASS. (`net/http`'s default `http.Client.redirectBehavior` strips `Authorization`, `Cookie`, and `WWW-Authenticate` when redirecting to a different host.)
+Expected: PASS. (`net/http`'s default redirect logic strips `Authorization`, `Cookie`, and `WWW-Authenticate` when the redirect target's hostname string differs from the origin's.)
 
 - [ ] **Step 3: Commit**
 
