@@ -71,22 +71,27 @@ All standard redirect status codes:
 ## Architecture
 
 A new file `internal/proxy/transport.go` defines a `redirectFollower` type
-that implements `http.RoundTripper`. It composes an `*http.Client` whose
-default redirect policy follows up to 10 hops, using `net/http`'s standard
-behavior for relative-URL resolution, cross-host header stripping
-(`Authorization`, `Cookie`, `WWW-Authenticate`), and cycle detection (via
-the hop limit).
+that implements `goproxy.RoundTripper` (signature
+`RoundTrip(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Response, error)`).
+It composes an `*http.Client` whose default redirect policy follows up to
+10 hops, using `net/http`'s standard behavior for relative-URL
+resolution, cross-host header stripping (`Authorization`, `Cookie`,
+`WWW-Authenticate`), and cycle detection (via the hop limit).
 
-`proxy.New()` sets `goproxy.ProxyHttpServer.Tr = &redirectFollower{...}`.
-The handler in `internal/proxy/handler.go` is unchanged. `HandleRequest`
-still computes the cache key from the original request before upstream is
-called; `HandleResponse` still receives a single response (now the
-*final* one after the chain) and caches it under the original key.
+`proxy.New()` constructs a `redirectFollower` (wrapping
+`http.DefaultTransport`) and stores it on the handler. `HandleRequest`
+sets `ctx.RoundTripper = h.upstream` on every request, so goproxy uses
+our redirect-following round-tripper for the upstream call instead of
+the default `proxy.Tr.RoundTrip`. (`proxy.Tr` is concretely typed
+`*http.Transport` in goproxy 1.8.x and cannot be directly swapped for a
+`RoundTripper`; `ctx.RoundTripper` is the documented per-context hook.)
+`HandleResponse` still receives a single response (now the *final* one
+after the chain) and caches it under the original key.
 
 A short comment on `redirectFollower.RoundTrip` notes that this layer
-intentionally exceeds the standard `RoundTripper` contract (a single round
-trip with no redirects) and explains why: caching needs the terminal body,
-and goproxy invokes us through this single seam.
+intentionally does more than a stdlib `http.RoundTripper` (a single
+round trip with no redirects) and explains why: caching needs the
+terminal body, and goproxy invokes us through this single seam.
 
 ## Data flow
 
@@ -159,8 +164,10 @@ proxy-level tests above exercise the full path.
 ## Files Changed
 
 - `internal/proxy/transport.go` — new file: `redirectFollower` type.
-- `internal/proxy/proxy.go` — wire `proxy.Tr` to a `redirectFollower`
-  wrapping `http.DefaultTransport`.
+- `internal/proxy/proxy.go` — instantiate a `redirectFollower` wrapping
+  `http.DefaultTransport` and pass it to the handler.
+- `internal/proxy/handler.go` — store the round-tripper on `Handler`;
+  set `ctx.RoundTripper` in `HandleRequest`.
 - `internal/proxy/proxy_test.go` — new tests listed above.
 - `README.md` — short note in the request-flow section that the proxy
   follows upstream redirects and caches the terminal body under the
