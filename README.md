@@ -265,8 +265,8 @@ Client Request
   → Compute cache key: SHA256(method + url + headers + body_hash)
   → Check L1 (local) → hit? → return cached response
   → Check L2 (GCS/S3) → hit? → backfill L1 + return cached response
-  → Miss → forward upstream (with timeout)
-  → Cache response (2xx-3xx only) to all tiers
+  → Miss → forward upstream (follows redirects up to 10 hops)
+  → Cache terminal response (2xx only) under the original URL
   → Return response to client
 ```
 
