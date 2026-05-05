@@ -37,11 +37,15 @@ func newRedirectFollower(base http.RoundTripper) *redirectFollower {
 //
 // On error, http.Client.Do may return both a non-nil response (the last hop in
 // the chain, e.g. the final 302 in a redirect loop) and a non-nil error. We
-// drop the response so goproxy takes its error path; otherwise the leaked 302
-// would be passed through to the client and the failure would be silent.
+// close the leaked body and drop the response so goproxy takes its error
+// path; otherwise the 302 would be passed through to the client (silent
+// failure) and the open body would leak the underlying connection.
 func (r *redirectFollower) RoundTrip(req *http.Request, _ *goproxy.ProxyCtx) (*http.Response, error) {
 	resp, err := r.client.Do(req)
 	if err != nil {
+		if resp != nil {
+			resp.Body.Close()
+		}
 		return nil, err
 	}
 	return resp, nil
