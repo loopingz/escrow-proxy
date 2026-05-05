@@ -873,6 +873,50 @@ func mustReadAll(t *testing.T, r io.Reader) []byte {
 	return b
 }
 
+func TestProxy_RelativeLocationRedirect(t *testing.T) {
+	var (
+		startCount, elsewhereCount int
+	)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/start":
+			startCount++
+			w.Header().Set("Location", "/elsewhere")
+			w.WriteHeader(http.StatusFound)
+		case "/elsewhere":
+			elsewhereCount++
+			w.Write([]byte("relative-ok"))
+		default:
+			t.Errorf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+	_, client := setupProxy(t, proxy.ModeServe, c)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp, err := client.Get(upstream.URL + "/start")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+	if string(body) != "relative-ok" {
+		t.Fatalf("body: got %q, want %q", body, "relative-ok")
+	}
+	if startCount != 1 || elsewhereCount != 1 {
+		t.Fatalf("upstream calls: got start=%d elsewhere=%d, want 1/1", startCount, elsewhereCount)
+	}
+}
+
 func TestProxy_PreservesResponseHeaders(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
