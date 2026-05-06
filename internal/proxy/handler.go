@@ -21,6 +21,7 @@ type Handler struct {
 	mode            Mode
 	logger          *slog.Logger
 	timeout         time.Duration
+	upstream        goproxy.RoundTripper
 }
 
 func (h *Handler) bypass(req *http.Request) (bool, string) {
@@ -37,6 +38,10 @@ func (h *Handler) bypass(req *http.Request) (bool, string) {
 }
 
 func (h *Handler) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+	if h.upstream != nil {
+		ctx.RoundTripper = h.upstream
+	}
+
 	if bypass, reason := h.bypass(req); bypass {
 		h.logger.Debug("bypass cache", "reason", reason, "method", req.Method, "url", req.URL.String())
 		if h.mode == ModeOffline {

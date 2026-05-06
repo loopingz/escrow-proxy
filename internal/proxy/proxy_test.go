@@ -505,6 +505,418 @@ func TestProxy_OfflineMode_BypassedMethodReturns502(t *testing.T) {
 	}
 }
 
+func TestProxy_FollowsRedirectAndCachesFinalBody(t *testing.T) {
+	var (
+		redirectCount int
+		finalCount    int
+		upstream      *httptest.Server
+	)
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/redirect":
+			redirectCount++
+			http.Redirect(w, r, upstream.URL+"/final", http.StatusFound)
+		case "/final":
+			finalCount++
+			w.Header().Set("Content-Type", "application/octet-stream")
+			w.Write([]byte("blob"))
+		default:
+			t.Errorf("unexpected upstream path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+	_, client := setupProxy(t, proxy.ModeServe, c)
+
+	// Disable client-side redirect-following so we can observe what the
+	// proxy itself returned (200 means proxy followed; 302 means it didn't).
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	// First request: proxy follows the redirect upstream and caches /redirect.
+	resp1, err := client.Get(upstream.URL + "/redirect")
+	if err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	body1, _ := io.ReadAll(resp1.Body)
+	resp1.Body.Close()
+	if resp1.StatusCode != http.StatusOK {
+		t.Fatalf("first request status: got %d, want 200 (proxy did not follow redirect)", resp1.StatusCode)
+	}
+	if string(body1) != "blob" {
+		t.Fatalf("first body: got %q, want %q", body1, "blob")
+	}
+	if redirectCount != 1 || finalCount != 1 {
+		t.Fatalf("upstream calls after first request: got redirect=%d final=%d, want 1/1", redirectCount, finalCount)
+	}
+
+	// Second request: served from cache for the ORIGINAL URL — no upstream calls.
+	resp2, err := client.Get(upstream.URL + "/redirect")
+	if err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("second request status: got %d, want 200", resp2.StatusCode)
+	}
+	if string(body2) != "blob" {
+		t.Fatalf("cached body: got %q, want %q", body2, "blob")
+	}
+	if redirectCount != 1 || finalCount != 1 {
+		t.Fatalf("upstream calls after cache hit: got redirect=%d final=%d, want 1/1 (cache miss)", redirectCount, finalCount)
+	}
+}
+
+func TestProxy_FollowsMultiHopRedirect(t *testing.T) {
+	var (
+		hop1, hop2, finalCount int
+		upstream               *httptest.Server
+	)
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/a":
+			hop1++
+			http.Redirect(w, r, upstream.URL+"/b", http.StatusFound)
+		case "/b":
+			hop2++
+			http.Redirect(w, r, upstream.URL+"/final", http.StatusMovedPermanently)
+		case "/final":
+			finalCount++
+			w.Write([]byte("two-hops"))
+		default:
+			t.Errorf("unexpected upstream path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer upstream.Close()
+
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+	_, client := setupProxy(t, proxy.ModeServe, c)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp, err := client.Get(upstream.URL + "/a")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+	if string(body) != "two-hops" {
+		t.Fatalf("body: got %q, want %q", body, "two-hops")
+	}
+	if hop1 != 1 || hop2 != 1 || finalCount != 1 {
+		t.Fatalf("upstream calls: got hop1=%d hop2=%d final=%d, want 1/1/1", hop1, hop2, finalCount)
+	}
+}
+
+func TestProxy_FollowsRedirectsAcrossHosts(t *testing.T) {
+	finalCount := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		finalCount++
+		w.Write([]byte("cross-host-payload"))
+	}))
+	defer target.Close()
+
+	originCount := 0
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		originCount++
+		http.Redirect(w, r, target.URL+"/blob", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+	_, client := setupProxy(t, proxy.ModeServe, c)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp1, err := client.Get(origin.URL + "/pkg")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	body1, _ := io.ReadAll(resp1.Body)
+	resp1.Body.Close()
+	if string(body1) != "cross-host-payload" {
+		t.Fatalf("body: got %q, want %q", body1, "cross-host-payload")
+	}
+	if originCount != 1 || finalCount != 1 {
+		t.Fatalf("first request: origin=%d final=%d, want 1/1", originCount, finalCount)
+	}
+
+	resp2, err := client.Get(origin.URL + "/pkg")
+	if err != nil {
+		t.Fatalf("request2: %v", err)
+	}
+	io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if originCount != 1 || finalCount != 1 {
+		t.Fatalf("after cache hit: origin=%d final=%d, want 1/1 (no new calls)", originCount, finalCount)
+	}
+}
+
+func TestProxy_StripsAuthHeaderOnCrossHostRedirect(t *testing.T) {
+	var (
+		gotAuthAtTarget string
+		gotAuthAtOrigin string
+	)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthAtTarget = r.Header.Get("Authorization")
+		w.Write([]byte("ok"))
+	}))
+	defer target.Close()
+
+	// Rewrite target.URL host (127.0.0.1) to localhost so stdlib sees a
+	// different hostname string and triggers cross-host header stripping.
+	// Both still resolve to the same loopback IP.
+	targetViaLocalhost := strings.Replace(target.URL, "127.0.0.1", "localhost", 1)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuthAtOrigin = r.Header.Get("Authorization")
+		http.Redirect(w, r, targetViaLocalhost+"/x", http.StatusFound)
+	}))
+	defer origin.Close()
+
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+	_, client := setupProxy(t, proxy.ModeServe, c)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	req, _ := http.NewRequest("GET", origin.URL+"/start", nil)
+	req.Header.Set("Authorization", "Bearer s3cret")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if gotAuthAtOrigin != "Bearer s3cret" {
+		t.Fatalf("origin Authorization: got %q, want %q (header should reach origin)", gotAuthAtOrigin, "Bearer s3cret")
+	}
+	if gotAuthAtTarget != "" {
+		t.Fatalf("target Authorization: got %q, want empty (stdlib should strip across hosts)", gotAuthAtTarget)
+	}
+}
+
+func TestProxy_TooManyRedirectsReturns500(t *testing.T) {
+	var upstream *httptest.Server
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Self-loop: every path redirects to /loop.
+		http.Redirect(w, r, upstream.URL+"/loop", http.StatusFound)
+	}))
+	defer upstream.Close()
+
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+	_, client := setupProxy(t, proxy.ModeServe, c)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp, err := client.Get(upstream.URL + "/start")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status: got %d, want 500", resp.StatusCode)
+	}
+
+	// Cache must remain empty: no entry was written for /start.
+	_, _, err = c.Get(t.Context(), proxy.ComputeCacheKey(mustReq(t, "GET", upstream.URL+"/start"), nil))
+	if err == nil {
+		t.Fatalf("cache should be empty for failed redirect chain, but got an entry")
+	}
+}
+
+// mustReq builds an *http.Request for cache-key computation in tests.
+func mustReq(t *testing.T, method, url string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(method, url, nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	return req
+}
+
+func TestProxy_RedirectChainEndingIn404NotCached(t *testing.T) {
+	var (
+		redirectCount, missingCount int
+		upstream                    *httptest.Server
+	)
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/start":
+			redirectCount++
+			http.Redirect(w, r, upstream.URL+"/missing", http.StatusFound)
+		case "/missing":
+			missingCount++
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte("not found"))
+		default:
+			t.Errorf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+	_, client := setupProxy(t, proxy.ModeServe, c)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	for i := 0; i < 2; i++ {
+		resp, err := client.Get(upstream.URL + "/start")
+		if err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("request %d status: got %d, want 404", i, resp.StatusCode)
+		}
+		io.ReadAll(resp.Body)
+		resp.Body.Close()
+	}
+
+	if redirectCount != 2 || missingCount != 2 {
+		t.Fatalf("upstream calls: got redirect=%d missing=%d, want 2/2 (4xx not cached)", redirectCount, missingCount)
+	}
+}
+
+func TestProxy_OfflineMode_ServesCachedFinalBodyForRedirect(t *testing.T) {
+	var (
+		redirectCount, finalCount int
+		upstream                  *httptest.Server
+	)
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/pkg":
+			redirectCount++
+			http.Redirect(w, r, upstream.URL+"/blob", http.StatusFound)
+		case "/blob":
+			finalCount++
+			w.Write([]byte("recorded-blob"))
+		default:
+			t.Errorf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+
+	dir := t.TempDir()
+
+	// --- Phase 1: serve mode populates the cache via a redirect chain ---
+	store1 := storage.NewLocal(dir)
+	c1 := cache.New(store1)
+	_, client1 := setupProxy(t, proxy.ModeServe, c1)
+	client1.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp, err := client1.Get(upstream.URL + "/pkg")
+	if err != nil {
+		t.Fatalf("populate: %v", err)
+	}
+	if string(mustReadAll(t, resp.Body)) != "recorded-blob" {
+		t.Fatalf("populate body wrong")
+	}
+	resp.Body.Close()
+
+	if redirectCount != 1 || finalCount != 1 {
+		t.Fatalf("populate phase: got redirect=%d final=%d, want 1/1", redirectCount, finalCount)
+	}
+
+	// --- Phase 2: shut down upstream and verify offline mode serves the original URL ---
+	upstreamURL := upstream.URL
+	upstream.Close()
+
+	store2 := storage.NewLocal(dir)
+	c2 := cache.New(store2)
+	_, client2 := setupProxy(t, proxy.ModeOffline, c2)
+	client2.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp2, err := client2.Get(upstreamURL + "/pkg")
+	if err != nil {
+		t.Fatalf("offline request: %v", err)
+	}
+	body, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("offline status: got %d, want 200", resp2.StatusCode)
+	}
+	if string(body) != "recorded-blob" {
+		t.Fatalf("offline body: got %q, want %q", body, "recorded-blob")
+	}
+}
+
+func mustReadAll(t *testing.T, r io.Reader) []byte {
+	t.Helper()
+	b, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	return b
+}
+
+func TestProxy_RelativeLocationRedirect(t *testing.T) {
+	var (
+		startCount, elsewhereCount int
+	)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/start":
+			startCount++
+			w.Header().Set("Location", "/elsewhere")
+			w.WriteHeader(http.StatusFound)
+		case "/elsewhere":
+			elsewhereCount++
+			w.Write([]byte("relative-ok"))
+		default:
+			t.Errorf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+	_, client := setupProxy(t, proxy.ModeServe, c)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+
+	resp, err := client.Get(upstream.URL + "/start")
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200", resp.StatusCode)
+	}
+	if string(body) != "relative-ok" {
+		t.Fatalf("body: got %q, want %q", body, "relative-ok")
+	}
+	if startCount != 1 || elsewhereCount != 1 {
+		t.Fatalf("upstream calls: got start=%d elsewhere=%d, want 1/1", startCount, elsewhereCount)
+	}
+}
+
 func TestProxy_PreservesResponseHeaders(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

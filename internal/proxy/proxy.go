@@ -3,6 +3,7 @@ package proxy
 import (
 	"crypto/tls"
 	"log/slog"
+	"net/http"
 	"regexp"
 	"time"
 
@@ -68,6 +69,7 @@ func New(cfg *Config) *goproxy.ProxyHttpServer {
 		mode:            cfg.Mode,
 		logger:          cfg.Logger,
 		timeout:         cfg.UpstreamTimeout,
+		upstream:        newRedirectFollower(http.DefaultTransport),
 	}
 
 	proxy.OnRequest().DoFunc(handler.HandleRequest)
