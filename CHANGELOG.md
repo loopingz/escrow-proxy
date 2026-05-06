@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/loopingz/escrow-proxy/compare/v0.6.0...v0.7.0) (2026-05-06)
+
+
+### Features
+
+* **proxy:** follow upstream redirects, cache terminal body ([#12](https://github.com/loopingz/escrow-proxy/issues/12)) ([55aa20d](https://github.com/loopingz/escrow-proxy/commit/55aa20dcf67022f7006b4b2351ad8dda0f642a6a))
+
 ## [0.6.0](https://github.com/loopingz/escrow-proxy/compare/v0.5.0...v0.6.0) (2026-05-04)
 
 
