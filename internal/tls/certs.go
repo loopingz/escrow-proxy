@@ -20,17 +20,23 @@ type CertCache struct {
 	cache   map[string]*cacheEntry
 	order   []string
 	maxSize int
+	now     func() time.Time
 }
 
 type cacheEntry struct {
 	cert *tls.Certificate
 }
 
+// renewMargin is how long before NotAfter we proactively regenerate a leaf,
+// so we don't hand out a cert that expires mid-connection.
+const renewMargin = time.Hour
+
 func NewCertCache(ca *CA, maxSize int) *CertCache {
 	return &CertCache{
 		ca:      ca,
 		cache:   make(map[string]*cacheEntry),
 		maxSize: maxSize,
+		now:     time.Now,
 	}
 }
 
@@ -39,7 +45,16 @@ func (c *CertCache) GetOrCreate(host string) (*tls.Certificate, error) {
 	defer c.mu.Unlock()
 
 	if entry, ok := c.cache[host]; ok {
-		return entry.cert, nil
+		if c.now().Add(renewMargin).Before(entry.cert.Leaf.NotAfter) {
+			return entry.cert, nil
+		}
+		delete(c.cache, host)
+		for i, h := range c.order {
+			if h == host {
+				c.order = append(c.order[:i], c.order[i+1:]...)
+				break
+			}
+		}
 	}
 
 	cert, err := c.generate(host)
