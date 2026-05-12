@@ -376,18 +376,21 @@ func newServeCmd() *cobra.Command {
 			c := cache.New(store).WithIndex(idx)
 
 			// Auto-reindex on first boot when storage has entries but the
-			// index is empty.
+			// index is empty. Run in the background so the proxy starts
+			// serving requests immediately — Cache.Get reads from storage,
+			// not the index, so an in-progress index is harmless.
 			if idx != nil {
 				if n, err := idx.Count(cmd.Context()); err == nil && n == 0 {
 					empty, _ := storageHasNoEntries(cmd.Context(), c)
 					if !empty {
-						logger := setupLogger(cfg.LogLevel)
-						logger.Info("auto-reindex: index is empty but cache has entries; rebuilding")
-						if ins, upd, rem, err := c.Reindex(cmd.Context()); err != nil {
-							logger.Warn("auto-reindex failed; run `cache reindex`", "error", err)
-						} else {
-							logger.Info("auto-reindex complete", "inserted", ins, "updated", upd, "removed", rem)
-						}
+						logger.Info("auto-reindex: index is empty but cache has entries; rebuilding in background")
+						go func() {
+							if ins, upd, rem, err := c.Reindex(cmd.Context()); err != nil {
+								logger.Warn("auto-reindex failed; run `cache reindex`", "error", err)
+							} else {
+								logger.Info("auto-reindex complete", "inserted", ins, "updated", upd, "removed", rem)
+							}
+						}()
 					}
 				}
 			}
