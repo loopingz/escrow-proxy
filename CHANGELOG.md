@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.7.1](https://github.com/loopingz/escrow-proxy/compare/v0.7.0...v0.7.1) (2026-05-12)
+
+
+### Bug Fixes
+
+* expire certificates ([bdac8f3](https://github.com/loopingz/escrow-proxy/commit/bdac8f3847344a7ee17f0dad002801a105eb8077))
+* invalid request handling ([d4ade9c](https://github.com/loopingz/escrow-proxy/commit/d4ade9c417dbd0002c75d49624f1840a4397caf1))
+* rebuild index as a background task ([11a8354](https://github.com/loopingz/escrow-proxy/commit/11a8354a2ba92d295b55e1f7ae1891d9c68b5e19))
+
 ## [0.7.0](https://github.com/loopingz/escrow-proxy/compare/v0.6.0...v0.7.0) (2026-05-06)
 
 
