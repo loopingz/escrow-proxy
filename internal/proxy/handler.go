@@ -42,6 +42,15 @@ func (h *Handler) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*http
 		ctx.RoundTripper = h.upstream
 	}
 
+	// goproxy's MITM loop (https.go:273) sets req.URL = nil when url.Parse
+	// fails on a malformed inner request, but still calls filterRequest
+	// before checking the parse error — so we must not deref req.URL.
+	// Returning (req, nil) lets goproxy take its "Illegal URL" path.
+	if req.URL == nil {
+		h.logger.Warn("dropping request with nil URL", "method", req.Method, "host", req.Host)
+		return req, nil
+	}
+
 	if bypass, reason := h.bypass(req); bypass {
 		h.logger.Debug("bypass cache", "reason", reason, "method", req.Method, "url", req.URL.String())
 		if h.mode == ModeOffline {
