@@ -196,6 +196,40 @@ func TestVerifyDigest_NonDigestURLNotChecked(t *testing.T) {
 	}
 }
 
+func TestVerifyDigest_HEADRequestNotChecked(t *testing.T) {
+	// OCI v2 clients (skopeo, oras, buildah, docker push cross-mount)
+	// probe blob existence with HEAD /v2/<name>/blobs/sha256:<digest>.
+	// HEAD responses carry no body by HTTP spec, so digest verification
+	// against an empty body would always fail. The proxy must skip digest
+	// verification for HEAD and forward the upstream response as-is.
+	body := []byte("real-content")
+	digest := sha256Hex(body)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Docker-Content-Digest", "sha256:"+digest)
+		w.Header().Set("Content-Length", "12")
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodGet {
+			w.Write(body)
+		}
+	}))
+	defer upstream.Close()
+
+	store := storage.NewLocal(t.TempDir())
+	c := cache.New(store)
+	client := setupDigestProxy(t, proxy.DigestMismatchError, c)
+
+	urlStr := upstream.URL + "/v2/library/foo/blobs/sha256:" + digest
+	req, _ := http.NewRequest(http.MethodHead, urlStr, nil)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("HEAD: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d, want 200 (HEAD must not trigger digest verification)", resp.StatusCode)
+	}
+}
+
 func TestVerifyDigest_PoisonedCacheHitEvictsAndRefetches(t *testing.T) {
 	// Seed the cache with a body that does NOT match the URL digest,
 	// simulating a previously-poisoned cache entry. The proxy must
