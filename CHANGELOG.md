@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.2](https://github.com/loopingz/escrow-proxy/compare/v0.8.1...v0.8.2) (2026-05-13)
+
+
+### Bug Fixes
+
+* head should not compute digest ([392f714](https://github.com/loopingz/escrow-proxy/commit/392f714c4ee960513255494528085bbcb7b55c47))
+
 ## [0.8.1](https://github.com/loopingz/escrow-proxy/compare/v0.8.0...v0.8.1) (2026-05-13)
 
 
