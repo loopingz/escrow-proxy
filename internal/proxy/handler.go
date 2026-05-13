@@ -123,7 +123,11 @@ func (h *Handler) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*http
 		// (truncated upstream read, MITM corruption, key collision) — evict
 		// it and fall through to a fresh upstream fetch. UserData remains
 		// populated so HandleResponse caches the fresh response.
-		if h.verifyDigest {
+		// HEAD responses carry no body by HTTP spec, so there's nothing to
+		// hash — skip verification. OCI clients use HEAD on by-digest URLs
+		// to probe blob existence; verifying an empty body would always
+		// fail and turn every HEAD into a spurious 502.
+		if h.verifyDigest && req.Method != http.MethodHead {
 			if digest := ExtractOCIDigest(req.URL.Path); digest != "" && !VerifyDigest(bodyBytes, digest) {
 				h.logger.Error("digest mismatch on cache hit; evicting and refetching",
 					"url", req.URL.String(), "key", key, "want", digest)
@@ -200,7 +204,7 @@ func (h *Handler) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *ht
 	// SHA256. Always evict any matching cache entry as a safety net
 	// against pre-existing poisoning, regardless of the configured
 	// client-facing action.
-	if h.verifyDigest {
+	if h.verifyDigest && ctx.Req.Method != http.MethodHead {
 		if digest := ExtractOCIDigest(ctx.Req.URL.Path); digest != "" && !VerifyDigest(bodyBytes, digest) {
 			h.logger.Error("digest mismatch on upstream response; refusing to cache",
 				"url", ctx.Req.URL.String(), "key", state.key, "want", digest,
