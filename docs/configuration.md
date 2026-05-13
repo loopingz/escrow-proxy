@@ -43,6 +43,17 @@ cache:
     - Accept
     - Accept-Encoding
 
+  # Content-digest verification for OCI v2 by-digest URLs
+  # (/v2/.../blobs/sha256:<hex> and /v2/.../manifests/sha256:<hex>).
+  # Bodies whose SHA256 does not match the digest in the URL are never
+  # cached, and any existing entry under the same key is evicted as a
+  # safety net against pre-existing poisoning.
+  verify_digest:
+    enabled: true        # default: true (also: --verify-digest)
+    on_mismatch: error   # 'error' returns HTTP 502; 'passthrough'
+                         # forwards the mismatched body to the client
+                         # without caching it (default: error)
+
 # Storage backend configuration
 storage:
   tiers:

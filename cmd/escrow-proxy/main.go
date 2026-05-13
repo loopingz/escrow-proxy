@@ -18,6 +18,7 @@ import (
 	"github.com/loopingz/escrow-proxy/internal/cache"
 	"github.com/loopingz/escrow-proxy/internal/config"
 	"github.com/loopingz/escrow-proxy/internal/index"
+	"github.com/loopingz/escrow-proxy/internal/metrics"
 	"github.com/loopingz/escrow-proxy/internal/proxy"
 	"github.com/loopingz/escrow-proxy/internal/storage"
 	tlspkg "github.com/loopingz/escrow-proxy/internal/tls"
@@ -56,6 +57,9 @@ func main() {
 	rootCmd.PersistentFlags().Duration("upstream-timeout", 30*time.Second, "upstream request timeout")
 	rootCmd.PersistentFlags().String("index-db", "", "path to local SQLite index DB (default: <local-dir>/index.db)")
 	rootCmd.PersistentFlags().Bool("no-index", false, "disable the SQLite index entirely")
+	rootCmd.PersistentFlags().String("metrics-listen", ":9090", "metrics HTTP server bind address (empty disables); falls back to $ESCROW_PROXY_METRICS_LISTEN")
+	rootCmd.PersistentFlags().Bool("verify-digest", true, "verify SHA256 of response bodies for OCI v2 by-digest URLs (/blobs/sha256:... and /manifests/sha256:...); mismatches are never cached")
+	rootCmd.PersistentFlags().String("verify-digest-on-mismatch", "error", "client-facing action on digest mismatch: 'error' (HTTP 502) or 'passthrough' (forward body, never cache)")
 
 	rootCmd.AddCommand(newServeCmd())
 	rootCmd.AddCommand(newRecordCmd())
@@ -168,8 +172,44 @@ func loadConfig(cmd *cobra.Command) (*config.Config, error) {
 		enabled := !disabled
 		cfg.Cache.Index.Enabled = &enabled
 	}
+	if cmd.Flags().Changed("metrics-listen") {
+		cfg.Metrics.Listen, _ = cmd.Flags().GetString("metrics-listen")
+	} else if v, ok := os.LookupEnv("ESCROW_PROXY_METRICS_LISTEN"); ok {
+		cfg.Metrics.Listen = v
+	}
+	if cmd.Flags().Changed("verify-digest") {
+		enabled, _ := cmd.Flags().GetBool("verify-digest")
+		cfg.Cache.VerifyDigest.Enabled = &enabled
+	}
+	if cmd.Flags().Changed("verify-digest-on-mismatch") {
+		v, _ := cmd.Flags().GetString("verify-digest-on-mismatch")
+		cfg.Cache.VerifyDigest.OnMismatch = v
+	}
+	switch cfg.Cache.VerifyDigest.OnMismatch {
+	case "", config.VerifyDigestActionError, config.VerifyDigestActionPassthrough:
+	default:
+		return nil, fmt.Errorf("invalid --verify-digest-on-mismatch %q: must be %q or %q",
+			cfg.Cache.VerifyDigest.OnMismatch, config.VerifyDigestActionError, config.VerifyDigestActionPassthrough)
+	}
 
 	return cfg, nil
+}
+
+// verifyDigestEnabled returns whether digest verification should run.
+// Defaults to true when the config doesn't say otherwise.
+func verifyDigestEnabled(cfg *config.Config) bool {
+	if cfg.Cache.VerifyDigest.Enabled == nil {
+		return true
+	}
+	return *cfg.Cache.VerifyDigest.Enabled
+}
+
+// digestMismatchAction converts the config string to the proxy enum.
+func digestMismatchAction(cfg *config.Config) proxy.DigestMismatchAction {
+	if cfg.Cache.VerifyDigest.OnMismatch == config.VerifyDigestActionPassthrough {
+		return proxy.DigestMismatchPassthrough
+	}
+	return proxy.DigestMismatchError
 }
 
 // indexEnabled returns whether the index should be opened. Defaults to
@@ -318,8 +358,35 @@ func caDir() string {
 	return filepath.Join(homeDir, ".escrow-proxy")
 }
 
+// startMetrics constructs a Metrics, registers scrape-time collectors,
+// and starts the metrics HTTP server. Returns the *Metrics (which may be
+// passed to proxy.Config) and a shutdown function. If cfg.Metrics.Listen
+// is empty, returns (nil, no-op shutdown, nil).
+func startMetrics(cfg *config.Config, logger *slog.Logger, ca *tlspkg.CA, idx *index.Index) (*metrics.Metrics, func(context.Context) error, error) {
+	noop := func(context.Context) error { return nil }
+	if cfg.Metrics.Listen == "" {
+		return nil, noop, nil
+	}
+
+	m := metrics.New()
+	if ca != nil {
+		m.RegisterCAExpiry(ca.Cert)
+	}
+	if idx != nil {
+		m.RegisterIndexEntries(idx.Count, logger)
+	}
+
+	shutdown, err := m.StartServer(cfg.Metrics.Listen, logger)
+	if err != nil {
+		return nil, noop, err
+	}
+	return m, shutdown, nil
+}
+
 // startProxy starts the HTTP server and handles graceful shutdown on signals.
-func startProxy(handler http.Handler, listen string, logger *slog.Logger, onShutdown func()) {
+// If metricsShutdown is non-nil, it is invoked during shutdown to stop the
+// metrics server before the proxy.
+func startProxy(handler http.Handler, listen string, logger *slog.Logger, metricsShutdown func(context.Context) error, onShutdown func()) {
 	srv := &http.Server{
 		Addr:    listen,
 		Handler: handler,
@@ -333,6 +400,9 @@ func startProxy(handler http.Handler, listen string, logger *slog.Logger, onShut
 		logger.Info("shutting down...")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		if metricsShutdown != nil {
+			_ = metricsShutdown(ctx)
+		}
 		_ = srv.Shutdown(ctx)
 	}()
 
@@ -375,6 +445,18 @@ func newServeCmd() *cobra.Command {
 
 			c := cache.New(store).WithIndex(idx)
 
+			certCache := tlspkg.NewCertCache(ca, 1000)
+
+			excludes, err := compileExcludes(cfg.Cache.ExcludePatterns)
+			if err != nil {
+				return err
+			}
+
+			m, metricsShutdown, err := startMetrics(cfg, logger, ca, idx)
+			if err != nil {
+				return err
+			}
+
 			// Auto-reindex on first boot when storage has entries but the
 			// index is empty. Run in the background so the proxy starts
 			// serving requests immediately — Cache.Get reads from storage,
@@ -384,7 +466,9 @@ func newServeCmd() *cobra.Command {
 					empty, _ := storageHasNoEntries(cmd.Context(), c)
 					if !empty {
 						logger.Info("auto-reindex: index is empty but cache has entries; rebuilding in background")
+						m.SetReindexInProgress(true)
 						go func() {
+							defer m.SetReindexInProgress(false)
 							if ins, upd, rem, err := c.Reindex(cmd.Context()); err != nil {
 								logger.Warn("auto-reindex failed; run `cache reindex`", "error", err)
 							} else {
@@ -395,26 +479,22 @@ func newServeCmd() *cobra.Command {
 				}
 			}
 
-			certCache := tlspkg.NewCertCache(ca, 1000)
-
-			excludes, err := compileExcludes(cfg.Cache.ExcludePatterns)
-			if err != nil {
-				return err
-			}
-
 			handler := proxy.New(&proxy.Config{
-				Mode:            proxy.ModeServe,
-				Cache:           c,
-				CertCache:       certCache,
-				CA:              ca,
-				KeyHeaders:      cfg.Cache.KeyHeaders,
-				Methods:         cfg.Cache.Methods,
-				ExcludePatterns: excludes,
-				UpstreamTimeout: cfg.UpstreamTimeout,
-				Logger:          logger,
+				Mode:                 proxy.ModeServe,
+				Cache:                c,
+				CertCache:            certCache,
+				CA:                   ca,
+				KeyHeaders:           cfg.Cache.KeyHeaders,
+				Methods:              cfg.Cache.Methods,
+				ExcludePatterns:      excludes,
+				UpstreamTimeout:      cfg.UpstreamTimeout,
+				Logger:               logger,
+				Metrics:              m,
+				VerifyDigest:         verifyDigestEnabled(cfg),
+				DigestMismatchAction: digestMismatchAction(cfg),
 			})
 
-			startProxy(handler, cfg.Listen, logger, func() {
+			startProxy(handler, cfg.Listen, logger, metricsShutdown, func() {
 				if idx != nil {
 					_ = idx.Close()
 				}
@@ -497,19 +577,27 @@ func newRecordCmd() *cobra.Command {
 				return err
 			}
 
+			m, metricsShutdown, err := startMetrics(cfg, logger, ca, nil)
+			if err != nil {
+				return err
+			}
+
 			handler := proxy.New(&proxy.Config{
-				Mode:            proxy.ModeRecord,
-				Cache:           c,
-				CertCache:       certCache,
-				CA:              ca,
-				KeyHeaders:      cfg.Cache.KeyHeaders,
-				Methods:         cfg.Cache.Methods,
-				ExcludePatterns: excludes,
-				UpstreamTimeout: cfg.UpstreamTimeout,
-				Logger:          logger,
+				Mode:                 proxy.ModeRecord,
+				Cache:                c,
+				CertCache:            certCache,
+				CA:                   ca,
+				KeyHeaders:           cfg.Cache.KeyHeaders,
+				Methods:              cfg.Cache.Methods,
+				ExcludePatterns:      excludes,
+				UpstreamTimeout:      cfg.UpstreamTimeout,
+				Logger:               logger,
+				Metrics:              m,
+				VerifyDigest:         verifyDigestEnabled(cfg),
+				DigestMismatchAction: digestMismatchAction(cfg),
 			})
 
-			startProxy(handler, cfg.Listen, logger, func() {
+			startProxy(handler, cfg.Listen, logger, metricsShutdown, func() {
 				logger.Info("finalizing archive", "output", cfg.Record.Output)
 				if err := rec.Finalize(); err != nil {
 					logger.Error("failed to finalize archive", "error", err)
@@ -588,20 +676,28 @@ func newOfflineCmd() *cobra.Command {
 				return err
 			}
 
+			m, metricsShutdown, err := startMetrics(cfg, logger, ca, nil)
+			if err != nil {
+				return err
+			}
+
 			handler := proxy.New(&proxy.Config{
-				Mode:            mode,
-				Cache:           c,
-				CertCache:       certCache,
-				CA:              ca,
-				KeyHeaders:      cfg.Cache.KeyHeaders,
-				Methods:         cfg.Cache.Methods,
-				ExcludePatterns: excludes,
-				UpstreamTimeout: cfg.UpstreamTimeout,
-				Logger:          logger,
-				AllowFallback:   cfg.Offline.AllowFallback,
+				Mode:                 mode,
+				Cache:                c,
+				CertCache:            certCache,
+				CA:                   ca,
+				KeyHeaders:           cfg.Cache.KeyHeaders,
+				Methods:              cfg.Cache.Methods,
+				ExcludePatterns:      excludes,
+				UpstreamTimeout:      cfg.UpstreamTimeout,
+				Logger:               logger,
+				AllowFallback:        cfg.Offline.AllowFallback,
+				Metrics:              m,
+				VerifyDigest:         verifyDigestEnabled(cfg),
+				DigestMismatchAction: digestMismatchAction(cfg),
 			})
 
-			startProxy(handler, cfg.Listen, logger, nil)
+			startProxy(handler, cfg.Listen, logger, metricsShutdown, nil)
 			return nil
 		},
 	}
