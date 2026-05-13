@@ -17,6 +17,7 @@ type Config struct {
 	Storage         StorageConfig `yaml:"storage"`
 	Record          RecordConfig  `yaml:"record"`
 	Offline         OfflineConfig `yaml:"offline"`
+	Metrics         MetricsConfig `yaml:"metrics"`
 	LogLevel        string        `yaml:"log_level"`
 	UpstreamTimeout time.Duration `yaml:"upstream_timeout"`
 }
@@ -27,11 +28,35 @@ type CAConfig struct {
 }
 
 type CacheConfig struct {
-	KeyHeaders      []string         `yaml:"key_headers"`
-	Methods         []string         `yaml:"methods"`
-	ExcludePatterns []string         `yaml:"exclude_patterns"`
-	Index           CacheIndexConfig `yaml:"index"`
+	KeyHeaders      []string           `yaml:"key_headers"`
+	Methods         []string           `yaml:"methods"`
+	ExcludePatterns []string           `yaml:"exclude_patterns"`
+	Index           CacheIndexConfig   `yaml:"index"`
+	VerifyDigest    VerifyDigestConfig `yaml:"verify_digest"`
 }
+
+// VerifyDigestConfig configures SHA256 verification of response bodies
+// whose request URL pins content by digest (OCI v2 blob and manifest
+// by-digest paths). The proxy never caches a mismatched response and
+// always evicts any existing entry under the same key on mismatch.
+type VerifyDigestConfig struct {
+	// Enabled controls whether digest verification runs. nil = default
+	// (true). Set explicitly to false to disable.
+	Enabled *bool `yaml:"enabled,omitempty"`
+	// OnMismatch governs the client-facing behavior when an upstream
+	// response body does not match the URL's claimed digest. "error"
+	// (default) returns HTTP 502; "passthrough" forwards the mismatched
+	// body to the client (which can run its own integrity check) but
+	// still refuses to cache it.
+	OnMismatch string `yaml:"on_mismatch,omitempty"`
+}
+
+// VerifyDigestMismatchActions enumerates the legal values for
+// VerifyDigestConfig.OnMismatch.
+const (
+	VerifyDigestActionError       = "error"
+	VerifyDigestActionPassthrough = "passthrough"
+)
 
 type CacheIndexConfig struct {
 	Enabled        *bool         `yaml:"enabled,omitempty"` // nil = default (true)
@@ -63,6 +88,13 @@ type OfflineConfig struct {
 	AllowFallback bool   `yaml:"allow_fallback"`
 }
 
+// MetricsConfig configures the Prometheus metrics HTTP server. Listen is
+// the bind address (default ":9090"); an empty string disables the
+// metrics server entirely.
+type MetricsConfig struct {
+	Listen string `yaml:"listen"`
+}
+
 func DefaultConfig() *Config {
 	homeDir, _ := os.UserHomeDir()
 	return &Config{
@@ -72,6 +104,9 @@ func DefaultConfig() *Config {
 		Cache: CacheConfig{
 			KeyHeaders: []string{"Accept", "Accept-Encoding"},
 			Methods:    []string{"GET", "HEAD"},
+			VerifyDigest: VerifyDigestConfig{
+				OnMismatch: VerifyDigestActionError,
+			},
 		},
 		Storage: StorageConfig{
 			Tiers: []StorageTierConfig{
@@ -80,6 +115,9 @@ func DefaultConfig() *Config {
 		},
 		Record: RecordConfig{
 			OCIEntriesPerLayer: 1000,
+		},
+		Metrics: MetricsConfig{
+			Listen: ":9090",
 		},
 	}
 }
@@ -100,6 +138,12 @@ func Load(path string) (*Config, error) {
 		if _, err := regexp.Compile(p); err != nil {
 			return nil, fmt.Errorf("invalid cache.exclude_patterns entry %q: %w", p, err)
 		}
+	}
+	switch cfg.Cache.VerifyDigest.OnMismatch {
+	case "", VerifyDigestActionError, VerifyDigestActionPassthrough:
+	default:
+		return nil, fmt.Errorf("invalid cache.verify_digest.on_mismatch %q: must be %q or %q",
+			cfg.Cache.VerifyDigest.OnMismatch, VerifyDigestActionError, VerifyDigestActionPassthrough)
 	}
 	return cfg, nil
 }

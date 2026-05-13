@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/elazarl/goproxy"
+	"github.com/loopingz/escrow-proxy/internal/metrics"
 )
 
 // redirectFollower is a goproxy.RoundTripper that follows upstream redirects
@@ -20,15 +21,17 @@ import (
 // transport through this single seam, which makes it a clean place to absorb
 // the redirect chain.
 type redirectFollower struct {
-	client *http.Client
+	client  *http.Client
+	metrics *metrics.Metrics
 }
 
-func newRedirectFollower(base http.RoundTripper) *redirectFollower {
+func newRedirectFollower(base http.RoundTripper, m *metrics.Metrics) *redirectFollower {
 	return &redirectFollower{
 		client: &http.Client{
 			Transport: base,
 			// CheckRedirect: nil → stdlib default: follow up to 10 hops.
 		},
+		metrics: m,
 	}
 }
 
@@ -46,6 +49,7 @@ func (r *redirectFollower) RoundTrip(req *http.Request, _ *goproxy.ProxyCtx) (*h
 		if resp != nil {
 			resp.Body.Close()
 		}
+		r.metrics.RecordUpstreamError(metrics.ClassifyUpstreamError(err))
 		return nil, err
 	}
 	return resp, nil

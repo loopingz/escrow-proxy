@@ -418,6 +418,8 @@ CLI flags override config file values.
 | `--cache-key-headers` | `Accept,Accept-Encoding` | Headers included in cache key |
 | `--log-level` | `info` (or `$ESCROW_PROXY_LOG_LEVEL`) | Log level: `debug`, `info`, `warn`, `error` |
 | `--upstream-timeout` | `30s` | Timeout for upstream requests |
+| `--verify-digest` | `true` | Verify SHA256 of response bodies on OCI v2 by-digest URLs; mismatches are never cached |
+| `--verify-digest-on-mismatch` | `error` | Client-facing action on mismatch: `error` (HTTP 502) or `passthrough` (forward body, don't cache) |
 
 #### Storage Flags
 
