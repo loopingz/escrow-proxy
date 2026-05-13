@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1](https://github.com/loopingz/escrow-proxy/compare/v0.8.0...v0.8.1) (2026-05-13)
+
+
+### Bug Fixes
+
+* build and add ci checks ([d9de6bc](https://github.com/loopingz/escrow-proxy/commit/d9de6bcf22a4fe261f6ab1278079995677e9f054))
+* go mod tidy ([95bbe21](https://github.com/loopingz/escrow-proxy/commit/95bbe21494353ce68d51ff2492331a4cc505ccf0))
+
 ## [0.8.0](https://github.com/loopingz/escrow-proxy/compare/v0.7.1...v0.8.0) (2026-05-13)
 
 
