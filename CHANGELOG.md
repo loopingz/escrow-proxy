@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/loopingz/escrow-proxy/compare/v0.7.1...v0.8.0) (2026-05-13)
+
+
+### Features
+
+* add sha256 verification ([2667821](https://github.com/loopingz/escrow-proxy/commit/2667821897b5a0810967249f0107cb5741844f74))
+
 ## [0.7.1](https://github.com/loopingz/escrow-proxy/compare/v0.7.0...v0.7.1) (2026-05-12)
 
 
