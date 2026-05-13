@@ -1,0 +1,94 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same ref (e.g. when a PR is force-pushed).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # go mod tidy with no diff catches the class of bug that broke
+      # v0.8.0: an in-tree package referenced from committed code that
+      # was never `git add`ed. Without the package, `go mod tidy` tries
+      # to resolve it as an external module and fails. We run it first
+      # so the error message is clear before the build noise.
+      - name: go mod tidy (must be clean)
+        run: |
+          go mod tidy
+          if ! git diff --exit-code -- go.mod go.sum; then
+            echo "::error::go.mod / go.sum drift after 'go mod tidy'. Run it locally and commit the result."
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: go test
+        run: go test -race -timeout 5m ./...
+
+  release-dry-run:
+    name: goreleaser dry-run
+    runs-on: ubuntu-latest
+    # Equivalent to what release-please.yml will do when a tag is cut,
+    # minus publishing / signing / pushing images. Catches:
+    #   - `go mod tidy` failures (the v0.8.0 break)
+    #   - missing files referenced by .goreleaser.yaml
+    #   - cross-compile failures in the build matrix
+    #   - .goreleaser.yaml schema errors
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # goreleaser inspects git history (tags, commit count) even in
+          # snapshot mode, so fetch the full history.
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Required by the dockers section of .goreleaser.yaml even in
+      # snapshot mode (the build step still runs; only the push is
+      # skipped via --skip=publish).
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: GoReleaser check (config schema)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: check
+
+      - name: GoReleaser snapshot (build everything, publish nothing)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --snapshot --clean --skip=publish,sign
