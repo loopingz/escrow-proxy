@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.3](https://github.com/loopingz/escrow-proxy/compare/v0.8.2...v0.8.3) (2026-06-11)
+
+
+### Bug Fixes
+
+* update ([c056069](https://github.com/loopingz/escrow-proxy/commit/c05606947243a4d220b3fabb4dfff17b6946070a))
+
 ## [0.8.2](https://github.com/loopingz/escrow-proxy/compare/v0.8.1...v0.8.2) (2026-05-13)
 
 
