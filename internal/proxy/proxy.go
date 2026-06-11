@@ -38,17 +38,19 @@ const (
 )
 
 type Config struct {
-	Mode            Mode
-	Cache           *cache.Cache
-	CertCache       *tlspkg.CertCache
-	CA              *tlspkg.CA
-	KeyHeaders      []string
-	Methods         []string
-	ExcludePatterns []*regexp.Regexp
-	UpstreamTimeout time.Duration
-	Logger          *slog.Logger
-	AllowFallback   bool
-	Metrics         *metrics.Metrics // optional; nil disables instrumentation
+	Mode               Mode
+	Cache              *cache.Cache
+	CertCache          *tlspkg.CertCache
+	CA                 *tlspkg.CA
+	KeyHeaders         []string
+	Methods            []string
+	ExcludePatterns    []*regexp.Regexp
+	RevalidatePatterns []*regexp.Regexp
+	RevalidateInterval time.Duration
+	UpstreamTimeout    time.Duration
+	Logger             *slog.Logger
+	AllowFallback      bool
+	Metrics            *metrics.Metrics // optional; nil disables instrumentation
 
 	// VerifyDigest enables SHA256 verification of response bodies whose
 	// URL pins content by digest (OCI v2 /blobs/sha256:<hex> and
@@ -94,6 +96,9 @@ func New(cfg *Config) *goproxy.ProxyHttpServer {
 		keyHeaders:           cfg.KeyHeaders,
 		methods:              methods,
 		excludePatterns:      cfg.ExcludePatterns,
+		revalidatePatterns:   cfg.RevalidatePatterns,
+		revalidateInterval:   cfg.RevalidateInterval,
+		now:                  time.Now,
 		mode:                 cfg.Mode,
 		logger:               cfg.Logger,
 		timeout:              cfg.UpstreamTimeout,

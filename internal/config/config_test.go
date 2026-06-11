@@ -60,6 +60,70 @@ cache:
 	}
 }
 
+func TestLoad_RevalidatePatternsAndInterval(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `
+cache:
+  revalidate_interval: 10m
+  revalidate_patterns:
+    - '/simple/'
+    - 'quay\.io/v2/auth'
+`
+	os.WriteFile(cfgPath, []byte(content), 0o644)
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Cache.RevalidateInterval.String() != "10m0s" {
+		t.Fatalf("RevalidateInterval: got %v, want 10m", cfg.Cache.RevalidateInterval)
+	}
+	if len(cfg.Cache.RevalidatePatterns) != 2 {
+		t.Fatalf("RevalidatePatterns: got %v", cfg.Cache.RevalidatePatterns)
+	}
+	if cfg.Cache.RevalidatePatterns[0] != "/simple/" {
+		t.Fatalf("RevalidatePatterns[0]: got %q", cfg.Cache.RevalidatePatterns[0])
+	}
+}
+
+func TestLoad_InvalidRevalidatePattern(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `
+cache:
+  revalidate_patterns:
+    - '[invalid('
+`
+	os.WriteFile(cfgPath, []byte(content), 0o644)
+
+	if _, err := config.Load(cfgPath); err == nil {
+		t.Fatal("expected error for invalid revalidate regex, got nil")
+	}
+}
+
+// When revalidate_patterns are set but revalidate_interval is not, Load
+// should populate a non-zero default. Zero interval would make every
+// matching cache hit stale on every request, defeating the cache.
+func TestLoad_RevalidateIntervalDefault(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `
+cache:
+  revalidate_patterns:
+    - '/simple/'
+`
+	os.WriteFile(cfgPath, []byte(content), 0o644)
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Cache.RevalidateInterval <= 0 {
+		t.Fatalf("RevalidateInterval default: got %v, want > 0", cfg.Cache.RevalidateInterval)
+	}
+}
+
 func TestLoad_InvalidExcludePattern(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")

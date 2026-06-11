@@ -28,12 +28,25 @@ type CAConfig struct {
 }
 
 type CacheConfig struct {
-	KeyHeaders      []string           `yaml:"key_headers"`
-	Methods         []string           `yaml:"methods"`
-	ExcludePatterns []string           `yaml:"exclude_patterns"`
-	Index           CacheIndexConfig   `yaml:"index"`
-	VerifyDigest    VerifyDigestConfig `yaml:"verify_digest"`
+	KeyHeaders      []string `yaml:"key_headers"`
+	Methods         []string `yaml:"methods"`
+	ExcludePatterns []string `yaml:"exclude_patterns"`
+	// RevalidatePatterns match URLs that should be served from cache only
+	// while fresh (younger than RevalidateInterval). Stale matches trigger
+	// an upstream fetch; if upstream returns 2xx, the cache is refreshed
+	// and the new response served. Anything else (3xx/4xx/5xx/network
+	// error) serves the cached body as a fallback.
+	RevalidatePatterns []string           `yaml:"revalidate_patterns"`
+	RevalidateInterval time.Duration      `yaml:"revalidate_interval"`
+	Index              CacheIndexConfig   `yaml:"index"`
+	VerifyDigest       VerifyDigestConfig `yaml:"verify_digest"`
 }
+
+// DefaultRevalidateInterval is used when revalidate_patterns are
+// configured but revalidate_interval is not. Anonymous OCI bearer tokens
+// last ~1h and PyPI Simple index pages change on every new wheel upload,
+// so 5m is a comfortable middle ground between freshness and load.
+const DefaultRevalidateInterval = 5 * time.Minute
 
 // VerifyDigestConfig configures SHA256 verification of response bodies
 // whose request URL pins content by digest (OCI v2 blob and manifest
@@ -138,6 +151,14 @@ func Load(path string) (*Config, error) {
 		if _, err := regexp.Compile(p); err != nil {
 			return nil, fmt.Errorf("invalid cache.exclude_patterns entry %q: %w", p, err)
 		}
+	}
+	for _, p := range cfg.Cache.RevalidatePatterns {
+		if _, err := regexp.Compile(p); err != nil {
+			return nil, fmt.Errorf("invalid cache.revalidate_patterns entry %q: %w", p, err)
+		}
+	}
+	if len(cfg.Cache.RevalidatePatterns) > 0 && cfg.Cache.RevalidateInterval <= 0 {
+		cfg.Cache.RevalidateInterval = DefaultRevalidateInterval
 	}
 	switch cfg.Cache.VerifyDigest.OnMismatch {
 	case "", VerifyDigestActionError, VerifyDigestActionPassthrough:
