@@ -16,15 +16,21 @@ import (
 )
 
 type Handler struct {
-	cache           *cache.Cache
-	keyHeaders      []string
-	methods         map[string]bool
-	excludePatterns []*regexp.Regexp
-	mode            Mode
-	logger          *slog.Logger
-	timeout         time.Duration
-	upstream        goproxy.RoundTripper
-	metrics         *metrics.Metrics
+	cache              *cache.Cache
+	keyHeaders         []string
+	methods            map[string]bool
+	excludePatterns    []*regexp.Regexp
+	revalidatePatterns []*regexp.Regexp
+	revalidateInterval time.Duration
+	// now is the clock source for revalidation freshness checks. Always
+	// time.Now in production; tests override to control "elapsed since
+	// CachedAt" without sleeping.
+	now      func() time.Time
+	mode     Mode
+	logger   *slog.Logger
+	timeout  time.Duration
+	upstream goproxy.RoundTripper
+	metrics  *metrics.Metrics
 
 	verifyDigest         bool
 	digestMismatchAction DigestMismatchAction
@@ -36,6 +42,12 @@ type Handler struct {
 type reqState struct {
 	key   string
 	start time.Time
+	// fallback holds the stale cached body when a revalidate-matching URL
+	// triggered an upstream refresh. If upstream returns non-2xx (or never
+	// responds), HandleResponse serves these bytes instead, leaving the
+	// cache entry untouched so the next request retries upstream.
+	fallback     []byte
+	fallbackMeta *cache.EntryMeta
 }
 
 // modeLabel maps Mode to the Prometheus label value.
@@ -63,6 +75,32 @@ func (h *Handler) recordRequest(req *http.Request, statusCode int, cache string,
 		cache,
 		time.Since(start),
 	)
+}
+
+// nowTime returns the handler clock, defaulting to time.Now when the
+// Handler was constructed without one (production always sets it via
+// proxy.New; direct construction in tests may not).
+func (h *Handler) nowTime() time.Time {
+	if h.now != nil {
+		return h.now()
+	}
+	return time.Now()
+}
+
+// needsRevalidation reports whether a cache hit for url is too old to
+// serve directly: the URL matches a revalidate pattern and the entry's
+// CachedAt is at least revalidateInterval ago. A zero CachedAt (legacy
+// entry written before the field existed) is immediately stale.
+func (h *Handler) needsRevalidation(url string, meta *cache.EntryMeta) bool {
+	if h.revalidateInterval <= 0 {
+		return false
+	}
+	for _, re := range h.revalidatePatterns {
+		if re.MatchString(url) {
+			return h.nowTime().Sub(meta.CachedAt) >= h.revalidateInterval
+		}
+	}
+	return false
 }
 
 func (h *Handler) bypass(req *http.Request) (bool, string) {
@@ -110,7 +148,8 @@ func (h *Handler) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*http
 	}
 
 	key := ComputeCacheKey(req, h.keyHeaders)
-	ctx.UserData = &reqState{key: key, start: start}
+	state := &reqState{key: key, start: start}
+	ctx.UserData = state
 
 	h.logger.Debug("request", "method", req.Method, "url", req.URL.String(), "cache_key", key)
 
@@ -136,6 +175,17 @@ func (h *Handler) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*http
 				return req, nil
 			}
 		}
+		// Stale entry on a revalidate-matching URL: defer to upstream for
+		// a fresh copy, keeping the cached body as a fallback in case
+		// upstream fails. Offline mode has no upstream, so staleness is
+		// ignored there and the cached body served as-is.
+		if h.mode != ModeOffline && h.needsRevalidation(req.URL.String(), meta) {
+			h.logger.Info("cache stale; revalidating upstream",
+				"url", req.URL.String(), "key", key, "cached_at", meta.CachedAt)
+			state.fallback = bodyBytes
+			state.fallbackMeta = meta
+			return req, nil
+		}
 		h.logger.Info("cache hit", "url", req.URL.String(), "key", key)
 		h.metrics.RecordCacheHit(int64(len(bodyBytes)))
 		resp := buildResponse(req, meta, bodyBytes)
@@ -160,8 +210,19 @@ func (h *Handler) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*http
 	return req, nil
 }
 
+// serveFallback answers with the stale cached body stashed by the
+// revalidation path. The cache entry (and its CachedAt) is deliberately
+// left untouched so the next request retries upstream immediately.
+func (h *Handler) serveFallback(state *reqState, ctx *goproxy.ProxyCtx, upstreamStatus int) *http.Response {
+	h.logger.Warn("revalidation failed; serving stale cached copy",
+		"url", ctx.Req.URL.String(), "key", state.key, "upstream_status", upstreamStatus)
+	resp := buildResponse(ctx.Req, state.fallbackMeta, state.fallback)
+	h.recordRequest(ctx.Req, resp.StatusCode, metrics.CacheHit, state.start)
+	return resp
+}
+
 func (h *Handler) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
-	if resp == nil || ctx.UserData == nil {
+	if ctx.UserData == nil {
 		return resp
 	}
 
@@ -170,16 +231,43 @@ func (h *Handler) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *ht
 		return resp
 	}
 
+	if resp == nil {
+		// Defensive: the production transport synthesizes a 502 on
+		// upstream errors precisely so this branch is never taken (goproxy's
+		// MITM loop skips filterResponse on RoundTrip errors). With a
+		// revalidation fallback in hand, serve the stale copy instead of
+		// letting goproxy synthesize an error for the client.
+		if state.fallbackMeta != nil {
+			return h.serveFallback(state, ctx, 0)
+		}
+		return resp
+	}
+
+	// Responses synthesized by the transport for upstream failures carry a
+	// marker header: strip it (internal detail) and skip the 5xx metric
+	// below — the transport already recorded the classified error.
+	upstreamErr := resp.Header.Get(upstreamErrorHeader) != ""
+	if upstreamErr {
+		resp.Header.Del(upstreamErrorHeader)
+	}
+
 	cacheOutcome := metrics.CacheMiss
 	if h.mode == ModeRecord {
 		cacheOutcome = metrics.CacheRecorded
 	}
 
 	// Record upstream 5xx errors. Other classes (timeout/dial/tls/etc.)
-	// are recorded in the transport, before goproxy synthesizes a 502
-	// for the client.
-	if resp.StatusCode >= 500 {
+	// are recorded in the transport, before it synthesizes a 502 for the
+	// client.
+	if resp.StatusCode >= 500 && !upstreamErr {
 		h.metrics.RecordUpstreamError(metrics.ErrKindUpstream5xx)
+	}
+
+	// Revalidation: only a 2xx refresh replaces the cached copy; any
+	// other status (3xx redirects included) serves the stale fallback.
+	if state.fallbackMeta != nil && (resp.StatusCode < 200 || resp.StatusCode >= 300) {
+		resp.Body.Close()
+		return h.serveFallback(state, ctx, resp.StatusCode)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
@@ -192,6 +280,12 @@ func (h *Handler) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *ht
 	resp.Body.Close()
 	if err != nil {
 		h.logger.Error("reading response body", "error", err)
+		// A truncated 2xx refresh is just another upstream failure for
+		// the revalidation path: serve the intact stale copy instead of
+		// the partial body.
+		if state.fallbackMeta != nil {
+			return h.serveFallback(state, ctx, resp.StatusCode)
+		}
 		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		h.recordRequest(ctx.Req, resp.StatusCode, cacheOutcome, state.start)
 		return resp
@@ -229,6 +323,7 @@ func (h *Handler) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *ht
 		URL:        ctx.Req.URL.String(),
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header.Clone(),
+		CachedAt:   h.nowTime(),
 	}
 
 	bgCtx := context.Background()

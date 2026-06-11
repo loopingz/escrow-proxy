@@ -279,9 +279,9 @@ func buildLocalStorage(cfg *config.Config) (storage.Storage, error) {
 	return nil, fmt.Errorf("no local storage tier configured")
 }
 
-// compileExcludes turns the configured regex strings into compiled patterns.
+// compilePatterns turns the configured regex strings into compiled patterns.
 // Load() already validated them, so compilation should not fail.
-func compileExcludes(patterns []string) ([]*regexp.Regexp, error) {
+func compilePatterns(patterns []string) ([]*regexp.Regexp, error) {
 	out := make([]*regexp.Regexp, 0, len(patterns))
 	for _, p := range patterns {
 		re, err := regexp.Compile(p)
@@ -447,7 +447,11 @@ func newServeCmd() *cobra.Command {
 
 			certCache := tlspkg.NewCertCache(ca, 1000)
 
-			excludes, err := compileExcludes(cfg.Cache.ExcludePatterns)
+			excludes, err := compilePatterns(cfg.Cache.ExcludePatterns)
+			if err != nil {
+				return err
+			}
+			revalidates, err := compilePatterns(cfg.Cache.RevalidatePatterns)
 			if err != nil {
 				return err
 			}
@@ -487,6 +491,8 @@ func newServeCmd() *cobra.Command {
 				KeyHeaders:           cfg.Cache.KeyHeaders,
 				Methods:              cfg.Cache.Methods,
 				ExcludePatterns:      excludes,
+				RevalidatePatterns:   revalidates,
+				RevalidateInterval:   cfg.Cache.RevalidateInterval,
 				UpstreamTimeout:      cfg.UpstreamTimeout,
 				Logger:               logger,
 				Metrics:              m,
@@ -572,7 +578,11 @@ func newRecordCmd() *cobra.Command {
 			c := rec.Cache()
 			certCache := tlspkg.NewCertCache(ca, 1000)
 
-			excludes, err := compileExcludes(cfg.Cache.ExcludePatterns)
+			excludes, err := compilePatterns(cfg.Cache.ExcludePatterns)
+			if err != nil {
+				return err
+			}
+			revalidates, err := compilePatterns(cfg.Cache.RevalidatePatterns)
 			if err != nil {
 				return err
 			}
@@ -590,6 +600,8 @@ func newRecordCmd() *cobra.Command {
 				KeyHeaders:           cfg.Cache.KeyHeaders,
 				Methods:              cfg.Cache.Methods,
 				ExcludePatterns:      excludes,
+				RevalidatePatterns:   revalidates,
+				RevalidateInterval:   cfg.Cache.RevalidateInterval,
 				UpstreamTimeout:      cfg.UpstreamTimeout,
 				Logger:               logger,
 				Metrics:              m,
@@ -671,7 +683,11 @@ func newOfflineCmd() *cobra.Command {
 				mode = proxy.ModeServe
 			}
 
-			excludes, err := compileExcludes(cfg.Cache.ExcludePatterns)
+			excludes, err := compilePatterns(cfg.Cache.ExcludePatterns)
+			if err != nil {
+				return err
+			}
+			revalidates, err := compilePatterns(cfg.Cache.RevalidatePatterns)
 			if err != nil {
 				return err
 			}
@@ -689,6 +705,8 @@ func newOfflineCmd() *cobra.Command {
 				KeyHeaders:           cfg.Cache.KeyHeaders,
 				Methods:              cfg.Cache.Methods,
 				ExcludePatterns:      excludes,
+				RevalidatePatterns:   revalidates,
+				RevalidateInterval:   cfg.Cache.RevalidateInterval,
 				UpstreamTimeout:      cfg.UpstreamTimeout,
 				Logger:               logger,
 				AllowFallback:        cfg.Offline.AllowFallback,

@@ -325,6 +325,42 @@ func TestCache_WithIndex_GetMissDeletesOrphanRow(t *testing.T) {
 	}
 }
 
+func TestEntryMeta_CachedAt_RoundTrip(t *testing.T) {
+	want := time.Date(2026, 5, 13, 22, 30, 0, 0, time.UTC)
+	meta := &cache.EntryMeta{
+		Method:     "GET",
+		URL:        "https://example.com/x",
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": {"text/plain"}},
+		CachedAt:   want,
+	}
+	data, err := cache.MarshalMeta(meta)
+	if err != nil {
+		t.Fatalf("MarshalMeta: %v", err)
+	}
+	got, err := cache.UnmarshalMeta(data)
+	if err != nil {
+		t.Fatalf("UnmarshalMeta: %v", err)
+	}
+	if !got.CachedAt.Equal(want) {
+		t.Fatalf("CachedAt round-trip: got %v, want %v", got.CachedAt, want)
+	}
+}
+
+// Legacy entries written before CachedAt existed have no "cached_at" field
+// in their JSON. They must unmarshal cleanly (zero value), which the
+// revalidate logic interprets as "immediately stale".
+func TestEntryMeta_LegacyJSON_NoCachedAt(t *testing.T) {
+	legacy := []byte(`{"method":"GET","url":"https://example.com/x","status_code":200,"header":{}}`)
+	got, err := cache.UnmarshalMeta(legacy)
+	if err != nil {
+		t.Fatalf("UnmarshalMeta legacy: %v", err)
+	}
+	if !got.CachedAt.IsZero() {
+		t.Fatalf("legacy CachedAt: got %v, want zero", got.CachedAt)
+	}
+}
+
 func TestCache_WithIndex_GetReconcilesMissingRow(t *testing.T) {
 	idx := newTestIndex(t)
 	c := cache.New(storage.NewLocal(t.TempDir())).WithIndex(idx)

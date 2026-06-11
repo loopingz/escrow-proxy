@@ -711,7 +711,11 @@ func TestProxy_StripsAuthHeaderOnCrossHostRedirect(t *testing.T) {
 	}
 }
 
-func TestProxy_TooManyRedirectsReturns500(t *testing.T) {
+// A redirect loop exhausts http.Client's 10-hop limit; the transport
+// converts that upstream failure into a synthesized 502 (so HandleResponse
+// always runs and can serve revalidation fallbacks) instead of goproxy's
+// generic 500 error path.
+func TestProxy_TooManyRedirectsReturns502(t *testing.T) {
 	var upstream *httptest.Server
 	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Self-loop: every path redirects to /loop.
@@ -732,8 +736,8 @@ func TestProxy_TooManyRedirectsReturns500(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("status: got %d, want 500", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status: got %d, want 502", resp.StatusCode)
 	}
 
 	// Cache must remain empty: no entry was written for /start.

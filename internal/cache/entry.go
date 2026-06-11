@@ -3,6 +3,7 @@ package cache
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 )
 
 type EntryMeta struct {
@@ -10,6 +11,10 @@ type EntryMeta struct {
 	URL        string      `json:"url"`
 	StatusCode int         `json:"status_code"`
 	Header     http.Header `json:"header"`
+	// CachedAt is when the entry was written. Zero value (e.g. from a
+	// legacy entry serialized before this field existed) is interpreted by
+	// the revalidate logic as "immediately stale".
+	CachedAt time.Time `json:"cached_at,omitempty"`
 }
 
 func MarshalMeta(meta *EntryMeta) ([]byte, error) {
