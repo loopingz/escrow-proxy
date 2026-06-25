@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/loopingz/escrow-proxy/compare/v0.8.4...v0.9.0) (2026-06-25)
+
+
+### Features
+
+* **cli:** add cache domains subcommand ([#27](https://github.com/loopingz/escrow-proxy/issues/27)) ([e010e65](https://github.com/loopingz/escrow-proxy/commit/e010e657535720e0f0780ff09d7a3aac5910cfd3))
+
 ## [0.8.4](https://github.com/loopingz/escrow-proxy/compare/v0.8.3...v0.8.4) (2026-06-25)
 
 
