@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"testing"
 	"time"
 
@@ -357,5 +358,97 @@ func TestHandleRequest_NilURL(t *testing.T) {
 	}
 	if gotResp != nil {
 		t.Fatalf("returned response: got %v, want nil (let goproxy hit its err path)", gotResp)
+	}
+}
+
+func TestNormalizeMatchURL(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"https default port stripped", "https://cgr.dev:443/token?scope=x", "https://cgr.dev/token?scope=x"},
+		{"http default port stripped", "http://example.com:80/v2/token", "http://example.com/v2/token"},
+		{"non-default https port kept", "https://cgr.dev:8443/token", "https://cgr.dev:8443/token"},
+		{"no explicit port unchanged", "https://cgr.dev/token", "https://cgr.dev/token"},
+		{"http :443 is not the default, kept", "http://cgr.dev:443/token", "http://cgr.dev:443/token"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := url.Parse(tc.in)
+			if err != nil {
+				t.Fatalf("parse %q: %v", tc.in, err)
+			}
+			if got := normalizeMatchURL(u); got != tc.want {
+				t.Fatalf("normalizeMatchURL(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBypass_HostAnchoredPatternMatchesDefaultPort guards the cgr.dev token
+// caching regression: goproxy's MITM path reconstructs req.URL with an
+// explicit ":443", so a host-anchored exclude pattern must still match.
+func TestBypass_HostAnchoredPatternMatchesDefaultPort(t *testing.T) {
+	h := &Handler{
+		methods:         map[string]bool{"GET": true},
+		excludePatterns: []*regexp.Regexp{regexp.MustCompile(`cgr\.dev/token`)},
+		mode:            ModeServe,
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	req, _ := http.NewRequest("GET", "https://cgr.dev:443/token?scope=repository:arize.com/x:pull&service=cgr.dev", nil)
+	bypassed, reason := h.bypass(req)
+	if !bypassed || reason != "exclude_pattern" {
+		t.Fatalf("bypass(cgr.dev:443/token) = (%v, %q), want (true, exclude_pattern)", bypassed, reason)
+	}
+}
+
+// A registry response relayed via a known-size buffer must carry a
+// Content-Length header and no chunked framing, or strict OCI clients reject
+// it with "response did not include Content-Length header".
+func TestBuildResponse_PinsContentLengthAndDropsChunked(t *testing.T) {
+	body := []byte("hello manifest")
+	meta := &cache.EntryMeta{
+		StatusCode: 200,
+		// Upstream returned the manifest chunked: no Content-Length, chunked TE.
+		Header: http.Header{"Transfer-Encoding": {"chunked"}},
+	}
+	req, _ := http.NewRequest("GET", "https://us-central1-docker.pkg.dev/v2/x/manifests/sha256:deadbeef", nil)
+
+	resp := buildResponse(req, meta, body)
+
+	if got := resp.Header.Get("Content-Length"); got != strconv.Itoa(len(body)) {
+		t.Errorf("Content-Length header = %q, want %q", got, strconv.Itoa(len(body)))
+	}
+	if resp.ContentLength != int64(len(body)) {
+		t.Errorf("ContentLength field = %d, want %d", resp.ContentLength, len(body))
+	}
+	if len(resp.TransferEncoding) != 0 || resp.Header.Get("Transfer-Encoding") != "" {
+		t.Errorf("chunked framing not dropped: TransferEncoding=%v header=%q",
+			resp.TransferEncoding, resp.Header.Get("Transfer-Encoding"))
+	}
+}
+
+func TestSetBufferedBody_PinsContentLengthAndDropsChunked(t *testing.T) {
+	body := []byte("blob bytes")
+	resp := &http.Response{
+		StatusCode:       200,
+		Header:           http.Header{"Transfer-Encoding": {"chunked"}},
+		TransferEncoding: []string{"chunked"},
+		ContentLength:    -1,
+		Body:             io.NopCloser(bytes.NewReader(body)),
+	}
+
+	setBufferedBody(resp, body)
+
+	if got := resp.Header.Get("Content-Length"); got != strconv.Itoa(len(body)) {
+		t.Errorf("Content-Length header = %q, want %q", got, strconv.Itoa(len(body)))
+	}
+	if resp.ContentLength != int64(len(body)) {
+		t.Errorf("ContentLength field = %d, want %d", resp.ContentLength, len(body))
+	}
+	if len(resp.TransferEncoding) != 0 || resp.Header.Get("Transfer-Encoding") != "" {
+		t.Errorf("chunked framing not dropped: TransferEncoding=%v header=%q",
+			resp.TransferEncoding, resp.Header.Get("Transfer-Encoding"))
 	}
 }
