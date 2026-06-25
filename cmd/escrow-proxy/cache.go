@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -532,6 +533,7 @@ func newCacheCmd() *cobra.Command {
 	cmd.AddCommand(newCacheShowCmd())
 	cmd.AddCommand(newCacheEvictCmd())
 	cmd.AddCommand(newCacheReindexCmd())
+	cmd.AddCommand(newCacheDomainsCmd())
 	return cmd
 }
 
@@ -846,6 +848,90 @@ func runReindex(ctx context.Context, opts reindexOptions) error {
 	return nil
 }
 
+// ---- domains ----
+
+type domainsOptions struct {
+	Cache *cache.Cache
+
+	Count bool
+	JSON  bool
+
+	Stdout io.Writer
+	Stderr io.Writer
+}
+
+type domainRow struct {
+	Domain string `json:"domain"`
+	Count  int    `json:"count"`
+}
+
+// runDomains extracts the set of distinct host[:port] values from the URLs
+// of every cache entry. With --count, each domain is reported with the
+// number of entries it backs. Output is sorted by domain name.
+func runDomains(ctx context.Context, opts domainsOptions) error {
+	counts := make(map[string]int)
+
+	add := func(rawURL string) {
+		host := domainFromURL(rawURL)
+		if host == "" {
+			return
+		}
+		counts[host]++
+	}
+
+	if idx := opts.Cache.Index(); idx != nil {
+		rows, err := idx.List(ctx, index.ListFilter{})
+		if err != nil {
+			return fmt.Errorf("index list: %w", err)
+		}
+		for _, r := range rows {
+			add(r.URL)
+		}
+	} else {
+		walkErr := opts.Cache.Walk(ctx, func(_ string, meta *cache.EntryMeta) error {
+			add(meta.URL)
+			return nil
+		})
+		if walkErr != nil {
+			return fmt.Errorf("scanning cache: %w", walkErr)
+		}
+	}
+
+	domains := make([]string, 0, len(counts))
+	for d := range counts {
+		domains = append(domains, d)
+	}
+	sort.Strings(domains)
+
+	for _, d := range domains {
+		switch {
+		case opts.JSON:
+			b, err := json.Marshal(domainRow{Domain: d, Count: counts[d]})
+			if err != nil {
+				return fmt.Errorf("marshaling domain: %w", err)
+			}
+			fmt.Fprintln(opts.Stdout, string(b))
+		case opts.Count:
+			fmt.Fprintf(opts.Stdout, "%d %s\n", counts[d], d)
+		default:
+			fmt.Fprintln(opts.Stdout, d)
+		}
+	}
+
+	fmt.Fprintf(opts.Stderr, "%d domains\n", len(domains))
+	return nil
+}
+
+// domainFromURL returns the host[:port] component of a request URL.
+// Returns "" when the URL cannot be parsed or has no host.
+func domainFromURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return u.Host
+}
+
 // ---- size + duration parsers ----
 
 // parseSize parses byte sizes with optional 1024-based suffixes K, M, G, T.
@@ -1031,6 +1117,43 @@ day they were written.`,
 	cmd.Flags().String("min-age", "", "skip entries accessed more recently than this (e.g., 24h, 7d)")
 	cmd.Flags().Bool("dry-run", false, "print what would be evicted without deleting")
 	cmd.Flags().Bool("json", false, "emit one JSON object per evicted entry")
+	return cmd
+}
+
+func newCacheDomainsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "domains",
+		Short: "List the distinct domains used across cache entries",
+		Long: `Extract the set of distinct host[:port] values from the URLs of
+every cache entry. Domains are printed one per line, sorted by name.
+
+Pass --count to prefix each domain with the number of entries it backs,
+or --json to emit one JSON object ({"domain","count"}) per line.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := loadConfig(cmd)
+			if err != nil {
+				return err
+			}
+			c, closer, err := buildCacheForCLI(cfg)
+			if err != nil {
+				return err
+			}
+			defer closer()
+
+			count, _ := cmd.Flags().GetBool("count")
+			jsonOut, _ := cmd.Flags().GetBool("json")
+
+			return runDomains(cmd.Context(), domainsOptions{
+				Cache:  c,
+				Count:  count,
+				JSON:   jsonOut,
+				Stdout: cmd.OutOrStdout(),
+				Stderr: cmd.ErrOrStderr(),
+			})
+		},
+	}
+	cmd.Flags().Bool("count", false, "prefix each domain with its entry count")
+	cmd.Flags().Bool("json", false, "emit one JSON object per domain")
 	return cmd
 }
 

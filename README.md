@@ -207,6 +207,25 @@ escrow-proxy cache show --url https://registry.npmjs.org/lodash --method GET
 escrow-proxy cache show --key 8d3f7a... --output /tmp/lodash.json
 ```
 
+#### Listing cached domains
+
+`cache domains` extracts the distinct `host[:port]` values used across all
+cache entries — handy for auditing which upstreams a recorded cache touches:
+
+```bash
+# Distinct domains, one per line, sorted
+escrow-proxy cache domains
+
+# Prefix each domain with the number of entries it backs
+escrow-proxy cache domains --count
+
+# Machine-readable (one {"domain","count"} object per line)
+escrow-proxy cache domains --json
+```
+
+When the SQLite index is available it is used for the scan; otherwise the
+command walks the `.meta` files on disk.
+
 #### Evicting old entries
 
 `cache evict` shrinks the local cache to a target total body size by

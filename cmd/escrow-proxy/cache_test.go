@@ -1179,6 +1179,126 @@ func TestReindex_AppliesChanges(t *testing.T) {
 	}
 }
 
+// ---- domains ----
+
+func runDomainsOpts(c *cache.Cache, mutate func(*domainsOptions)) (string, string, error) {
+	var stdout, stderr bytes.Buffer
+	opts := domainsOptions{Cache: c, Stdout: &stdout, Stderr: &stderr}
+	if mutate != nil {
+		mutate(&opts)
+	}
+	err := runDomains(context.Background(), opts)
+	return stdout.String(), stderr.String(), err
+}
+
+func TestDomains_DistinctSorted(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/a")
+	put("k2", "GET", "https://example.com/b")
+	put("k3", "GET", "https://registry.npmjs.org/pkg")
+	put("k4", "GET", "https://files.pythonhosted.org/x")
+
+	stdout, stderr, err := runDomainsOpts(c, nil)
+	if err != nil {
+		t.Fatalf("runDomains: %v", err)
+	}
+	got := nonEmptyLines(stdout)
+	want := []string{"example.com", "files.pythonhosted.org", "registry.npmjs.org"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("at %d: expected %q, got %q (all=%v)", i, want[i], got[i], got)
+		}
+	}
+	if !strings.Contains(stderr, "3 domains") {
+		t.Fatalf("expected summary, got %q", stderr)
+	}
+}
+
+func TestDomains_Count(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/a")
+	put("k2", "GET", "https://example.com/b")
+	put("k3", "GET", "https://registry.npmjs.org/pkg")
+
+	stdout, _, err := runDomainsOpts(c, func(o *domainsOptions) { o.Count = true })
+	if err != nil {
+		t.Fatalf("runDomains: %v", err)
+	}
+	lines := nonEmptyLines(stdout)
+	if !linesContain(lines, "2 example.com") {
+		t.Fatalf("expected '2 example.com', got %v", lines)
+	}
+	if !linesContain(lines, "1 registry.npmjs.org") {
+		t.Fatalf("expected '1 registry.npmjs.org', got %v", lines)
+	}
+}
+
+func TestDomains_JSON(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com/a")
+	put("k2", "GET", "https://example.com/b")
+
+	stdout, _, err := runDomainsOpts(c, func(o *domainsOptions) { o.JSON = true })
+	if err != nil {
+		t.Fatalf("runDomains: %v", err)
+	}
+	var got domainRow
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &got); err != nil {
+		t.Fatalf("invalid JSON: %v (%q)", err, stdout)
+	}
+	if got.Domain != "example.com" || got.Count != 2 {
+		t.Fatalf("unexpected row: %+v", got)
+	}
+}
+
+func TestDomains_PortPreserved(t *testing.T) {
+	c, put := newTestCache(t)
+	put("k1", "GET", "https://example.com:8443/a")
+
+	stdout, _, err := runDomainsOpts(c, nil)
+	if err != nil {
+		t.Fatalf("runDomains: %v", err)
+	}
+	if !linesContain(nonEmptyLines(stdout), "example.com:8443") {
+		t.Fatalf("expected host:port preserved, got %q", stdout)
+	}
+}
+
+func TestDomains_UsesIndex(t *testing.T) {
+	c, put := newTestCacheWithIndex(t)
+	put("k1", "GET", "https://example.com/a")
+	put("k2", "GET", "https://registry.npmjs.org/pkg")
+
+	stdout, stderr, err := runDomainsOpts(c, nil)
+	if err != nil {
+		t.Fatalf("runDomains: %v", err)
+	}
+	lines := nonEmptyLines(stdout)
+	if !linesContain(lines, "example.com") || !linesContain(lines, "registry.npmjs.org") {
+		t.Fatalf("expected both domains, got %v", lines)
+	}
+	if !strings.Contains(stderr, "2 domains") {
+		t.Fatalf("expected summary, got %q", stderr)
+	}
+}
+
+func TestDomains_Empty(t *testing.T) {
+	c, _ := newTestCache(t)
+	stdout, stderr, err := runDomainsOpts(c, nil)
+	if err != nil {
+		t.Fatalf("runDomains: %v", err)
+	}
+	if strings.TrimSpace(stdout) != "" {
+		t.Fatalf("expected empty stdout, got %q", stdout)
+	}
+	if !strings.Contains(stderr, "0 domains") {
+		t.Fatalf("expected '0 domains', got %q", stderr)
+	}
+}
+
 // ---- helpers ----
 
 func nonEmptyLines(s string) []string {
