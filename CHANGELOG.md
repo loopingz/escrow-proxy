@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.4](https://github.com/loopingz/escrow-proxy/compare/v0.8.3...v0.8.4) (2026-06-25)
+
+
+### Bug Fixes
+
+* cache revalidation with stale fallback + OCI digest verification ([793bcc2](https://github.com/loopingz/escrow-proxy/commit/793bcc2b0853060dba2a41f172e6c60dc2779de7))
+* pin Content-Length and drop chunked framing on buffered responses ([#24](https://github.com/loopingz/escrow-proxy/issues/24)) ([ab874dd](https://github.com/loopingz/escrow-proxy/commit/ab874ddeed4557316b2403ab20a38b89fe02c434))
+
 ## [0.8.3](https://github.com/loopingz/escrow-proxy/compare/v0.8.2...v0.8.3) (2026-06-11)
 
 
