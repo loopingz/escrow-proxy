@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"time"
@@ -107,13 +108,29 @@ func (h *Handler) bypass(req *http.Request) (bool, string) {
 	if len(h.methods) > 0 && !h.methods[req.Method] {
 		return true, "method"
 	}
-	url := req.URL.String()
+	url := normalizeMatchURL(req.URL)
 	for _, re := range h.excludePatterns {
 		if re.MatchString(url) {
 			return true, "exclude_pattern"
 		}
 	}
 	return false, ""
+}
+
+// normalizeMatchURL renders a URL for exclude-pattern matching with the
+// default port elided. goproxy's MITM path reconstructs req.URL with an
+// explicit ":443" (or ":80"), so a host-anchored pattern like
+// `cgr\.dev/token` would otherwise never match `cgr.dev:443/token` and the
+// (per-scope, short-lived) bearer token would be cached and served stale.
+// Patterns are written against the canonical host without the default port.
+func normalizeMatchURL(u *url.URL) string {
+	if port := u.Port(); (u.Scheme == "https" && port == "443") ||
+		(u.Scheme == "http" && port == "80") {
+		clone := *u
+		clone.Host = u.Hostname()
+		return clone.String()
+	}
+	return u.String()
 }
 
 func (h *Handler) HandleRequest(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
@@ -286,7 +303,7 @@ func (h *Handler) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *ht
 		if state.fallbackMeta != nil {
 			return h.serveFallback(state, ctx, resp.StatusCode)
 		}
-		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		setBufferedBody(resp, bodyBytes)
 		h.recordRequest(ctx.Req, resp.StatusCode, cacheOutcome, state.start)
 		return resp
 	}
@@ -345,11 +362,31 @@ func (h *Handler) digestMismatchActionLabel() string {
 	return "error"
 }
 
+// setBufferedBody re-serves resp from a fully-read, in-memory buffer. Because
+// the body length is now known, it pins Content-Length and drops any chunked
+// framing inherited from upstream. Without this, a manifest or blob the
+// registry returned with Transfer-Encoding: chunked would be relayed without a
+// Content-Length header, which strict OCI clients (e.g. go-containerregistry)
+// reject with "response did not include Content-Length header".
+func setBufferedBody(resp *http.Response, body []byte) {
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	resp.TransferEncoding = nil
+	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	resp.Header.Del("Transfer-Encoding")
+}
+
 func buildResponse(req *http.Request, meta *cache.EntryMeta, body []byte) *http.Response {
+	header := meta.Header.Clone()
+	// Same rationale as setBufferedBody: a cache hit is served from a known-size
+	// buffer, so pin Content-Length and drop any chunked framing recorded in the
+	// cached header.
+	header.Set("Content-Length", strconv.Itoa(len(body)))
+	header.Del("Transfer-Encoding")
 	return &http.Response{
 		StatusCode:    meta.StatusCode,
 		Status:        http.StatusText(meta.StatusCode),
-		Header:        meta.Header.Clone(),
+		Header:        header,
 		Body:          io.NopCloser(bytes.NewReader(body)),
 		ContentLength: int64(len(body)),
 		Request:       req,
