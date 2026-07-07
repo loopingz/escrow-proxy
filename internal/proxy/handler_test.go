@@ -429,6 +429,79 @@ func TestBuildResponse_PinsContentLengthAndDropsChunked(t *testing.T) {
 	}
 }
 
+// Both HEAD serving paths must report the origin's advertised size (527), not
+// the empty-body length (0) — the issue-29 repro (HEAD miss, then cached retry)
+// reduced to the two proxy hops. See buildResponse for why.
+func TestHEAD_PreservesContentLength(t *testing.T) {
+	now := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
+	h, _ := newRevalidateHandler(t, func() time.Time { return now })
+	reqURL := "https://us-central1-docker.pkg.dev/v2/x/manifests/sha256:deadbeef"
+
+	// The first HEAD misses the cache and is served straight from upstream,
+	// exercising HandleResponse's pass-through of the origin's Content-Length.
+	t.Run("non-cached (cache miss, served from upstream)", func(t *testing.T) {
+		req := mkReq(t, http.MethodHead, reqURL)
+		ctx := &goproxy.ProxyCtx{Req: req}
+		if _, resp := h.HandleRequest(req, ctx); resp != nil {
+			t.Fatal("first HEAD should miss and defer to upstream")
+		}
+		// Upstream HEAD: real Content-Length, empty body (per HTTP spec).
+		upstream := &http.Response{
+			StatusCode:    200,
+			Header:        http.Header{"Content-Length": {"527"}},
+			ContentLength: 527,
+			Body:          io.NopCloser(bytes.NewReader(nil)),
+			Request:       req,
+		}
+		resp := h.HandleResponse(upstream, ctx)
+		if got := resp.Header.Get("Content-Length"); got != "527" {
+			t.Errorf("Content-Length header = %q, want %q", got, "527")
+		}
+		if resp.ContentLength != 527 {
+			t.Errorf("ContentLength field = %d, want 527", resp.ContentLength)
+		}
+	})
+
+	// The identical HEAD now hits the cache entry stored above and is served by
+	// buildResponse, which must not derive Content-Length from the empty body.
+	t.Run("cached (cache hit, served from stored entry)", func(t *testing.T) {
+		req := mkReq(t, http.MethodHead, reqURL)
+		ctx := &goproxy.ProxyCtx{Req: req}
+		_, resp := h.HandleRequest(req, ctx)
+		if resp == nil {
+			t.Fatal("second HEAD should hit cache")
+		}
+		if got := resp.Header.Get("Content-Length"); got != "527" {
+			t.Errorf("Content-Length header = %q, want %q", got, "527")
+		}
+		if resp.ContentLength != 527 {
+			t.Errorf("ContentLength field = %d, want 527", resp.ContentLength)
+		}
+	})
+}
+
+// Cached HEAD edge case: when the origin's HEAD carried no Content-Length,
+// buildResponse must leave it unset (ContentLength -1, no header) rather than
+// asserting a bogus 0. Unit-level because no origin round-trip is involved.
+func TestBuildResponse_CachedHEAD_NoOriginContentLength_LeavesUnset(t *testing.T) {
+	var body []byte // empty, as every cached HEAD entry is
+	meta := &cache.EntryMeta{
+		StatusCode: 200,
+		Method:     http.MethodHead,
+		Header:     http.Header{"Content-Type": {"application/vnd.oci.image.manifest.v1+json"}},
+	}
+	req, _ := http.NewRequest(http.MethodHead, "https://us-central1-docker.pkg.dev/v2/x/manifests/sha256:deadbeef", nil)
+
+	resp := buildResponse(req, meta, body)
+
+	if got := resp.Header.Get("Content-Length"); got != "" {
+		t.Errorf("Content-Length header = %q, want empty", got)
+	}
+	if resp.ContentLength != -1 {
+		t.Errorf("ContentLength field = %d, want -1", resp.ContentLength)
+	}
+}
+
 func TestSetBufferedBody_PinsContentLengthAndDropsChunked(t *testing.T) {
 	body := []byte("blob bytes")
 	resp := &http.Response{
