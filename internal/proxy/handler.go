@@ -378,17 +378,31 @@ func setBufferedBody(resp *http.Response, body []byte) {
 
 func buildResponse(req *http.Request, meta *cache.EntryMeta, body []byte) *http.Response {
 	header := meta.Header.Clone()
-	// Same rationale as setBufferedBody: a cache hit is served from a known-size
-	// buffer, so pin Content-Length and drop any chunked framing recorded in the
-	// cached header.
-	header.Set("Content-Length", strconv.Itoa(len(body)))
+	contentLength := int64(len(body))
+	if req.Method == http.MethodHead {
+		// A HEAD has no body but its Content-Length still advertises the size a
+		// GET would return. Keep that header value; deriving it from len(body)
+		// would report 0, which OCI push tooling rejects.
+		if cl, err := strconv.ParseInt(header.Get("Content-Length"), 10, 64); err == nil {
+			contentLength = cl
+		} else {
+			// Origin sent no Content-Length; leave it unset rather than assert 0.
+			contentLength = -1
+		}
+	} else {
+		// Same rationale as setBufferedBody: a cache hit is served from a
+		// known-size buffer, so pin Content-Length to the body length.
+		header.Set("Content-Length", strconv.Itoa(len(body)))
+	}
+	// Drop any chunked framing recorded in the cached header — the body is
+	// served whole from an in-memory buffer.
 	header.Del("Transfer-Encoding")
 	return &http.Response{
 		StatusCode:    meta.StatusCode,
 		Status:        http.StatusText(meta.StatusCode),
 		Header:        header,
 		Body:          io.NopCloser(bytes.NewReader(body)),
-		ContentLength: int64(len(body)),
+		ContentLength: contentLength,
 		Request:       req,
 		Proto:         "HTTP/1.1",
 		ProtoMajor:    1,
