@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/loopingz/escrow-proxy/compare/v0.9.0...v0.9.1) (2026-07-07)
+
+
+### Bug Fixes
+
+* preserve origin Content-Length on cached HEAD responses ([#30](https://github.com/loopingz/escrow-proxy/issues/30)) ([581a35f](https://github.com/loopingz/escrow-proxy/commit/581a35f97cec7ad1df4899215e2470c3cba9ee89)), closes [#29](https://github.com/loopingz/escrow-proxy/issues/29)
+
 ## [0.9.0](https://github.com/loopingz/escrow-proxy/compare/v0.8.4...v0.9.0) (2026-06-25)
 
 
