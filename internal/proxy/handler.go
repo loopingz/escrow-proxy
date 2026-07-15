@@ -437,11 +437,21 @@ func buildResponse(req *http.Request, meta *cache.EntryMeta, body []byte) *http.
 }
 
 // maxResolveBytes caps how much of the fallback GET body resolveHeadSize will
-// buffer in memory. The manifests and indexes it resolves are a few KB, so
-// 4 MiB never truncates a real one; the cap only guards against an unexpected
-// large body (a blob) or a pathological response. A body over this size is not
-// partially counted: resolveHeadSize returns ok=false rather than report a
-// truncated length.
+// buffer in memory.
+//
+// What we resolve here is a *manifest*, not the image payload. The HEADs that
+// reach this path are OCI manifest existence/size checks (go-containerregistry's
+// headManifest). A manifest is the image's small JSON table of contents: it
+// lists the config and layer blobs by digest and size, but is not itself the
+// bytes of the image, so it is a few KB. The large payload -- the config and
+// layer blobs, MBs to hundreds of MBs -- lives at separate /blobs/ URLs and is
+// never fetched here.
+//
+// So 4 MiB never truncates a real manifest; the cap only guards the case where
+// this GET unexpectedly lands on a large body (a blob) or a pathological
+// response. A body over the cap is not partially counted: resolveHeadSize
+// returns ok=false rather than report a truncated length, so we never pull a
+// large payload just to answer a HEAD.
 const maxResolveBytes = 4 << 20 // 4 MiB
 
 // resolveHeadSize finds the Content-Length a HEAD should advertise when the
