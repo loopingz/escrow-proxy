@@ -335,12 +335,17 @@ func (h *Handler) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *ht
 		}
 	}
 
-	// A HEAD we serve/cache must carry a usable Content-Length: strict OCI clients
-	// (go-containerregistry) reject a missing length (-1) and do not retry, so a
-	// single header-less HEAD fails an image push. A HEAD has no body to measure,
-	// so when the length is absent or a bogus 0 we resolve it from the
-	// representation. If we can't, serve as-is but DO NOT cache -- never storing a
-	// header-less HEAD means there is no poisoned entry to evict later.
+	// Invariant: only cache a HEAD that carries a real Content-Length.
+	//
+	// Strict OCI clients (go-containerregistry) treat a missing length (-1)
+	// as fatal and do not retry, so relaying one header-less HEAD is enough
+	// to fail an image push. A HEAD has no body of its own to measure, so
+	// when the length is absent (or a bogus 0) we look it up from the
+	// representation via resolveHeadSize.
+	//
+	// If it cannot be resolved, serve the response as-is but do not cache it.
+	// That keeps the invariant true with no cleanup path: a stored HEAD always
+	// has a valid length, so there is never a bad entry to detect later.
 	if ctx.Req.Method == http.MethodHead {
 		if cl, cerr := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64); cerr != nil || cl <= 0 {
 			size, ok := h.resolveHeadSize(ctx.Req)
@@ -431,25 +436,29 @@ func buildResponse(req *http.Request, meta *cache.EntryMeta, body []byte) *http.
 	}
 }
 
-// maxResolveBytes bounds the in-memory buffer for resolveHeadSize's fallback GET.
-// The manifests/indexes it resolves are a few KB, so this ceiling never truncates
-// a legitimate one; it exists to cap memory in case the URL unexpectedly points at
-// a large body (e.g. a blob) or a pathological response. If a body exceeds it,
-// resolveHeadSize declines to report a length rather than return a truncated size.
+// maxResolveBytes caps how much of the fallback GET body resolveHeadSize will
+// buffer in memory. The manifests and indexes it resolves are a few KB, so
+// 4 MiB never truncates a real one; the cap only guards against an unexpected
+// large body (a blob) or a pathological response. A body over this size is not
+// partially counted: resolveHeadSize returns ok=false rather than report a
+// truncated length.
 const maxResolveBytes = 4 << 20 // 4 MiB
 
-// resolveHeadSize returns the octet length a GET for req.URL would yield -- the
-// value a spec-conformant HEAD must advertise (RFC 9110 §8.6) -- for use when an
-// upstream HEAD response carried no usable Content-Length. Order, cheapest first:
+// resolveHeadSize finds the Content-Length a HEAD should advertise when the
+// upstream HEAD arrived without a usable one. The correct value is the octet
+// length a GET for the same URL would return (RFC 9110 §8.6), obtained two
+// ways, cheapest first:
 //
-//  1. A sibling GET cache entry's stored (positive) Content-Length -- no egress.
-//  2. One GET to origin, reusing the inbound auth/accept; its buffered body length
-//     is the true size, cached under the GET key so the client's own GET is a hit
-//     and later HEADs take branch 1. At most one small fetch per digest.
+//  1. Reuse a sibling GET already in the cache: if one exists with a positive
+//     stored Content-Length, return it. No network.
+//  2. Otherwise make one GET to origin, count its body, and return that length.
+//     The body is cached under the GET key, so the client's own GET becomes a
+//     hit and any later HEAD is answered by branch 1.
 //
-// Returns ok=false if the size can't be determined (offline, no upstream, GET
-// error/non-200, or a by-digest body that fails verification); the caller then
-// serves the HEAD as-is without caching rather than assert a wrong value.
+// Returns ok=false when the length cannot be trusted: offline or no upstream,
+// GET error or non-200, body over maxResolveBytes, or a by-digest body that
+// fails verification. The caller then serves the HEAD without caching it,
+// rather than advertise a guessed length.
 func (h *Handler) resolveHeadSize(req *http.Request) (int64, bool) {
 	getReq := &http.Request{Method: http.MethodGet, URL: req.URL, Header: req.Header.Clone()}
 	getKey := ComputeCacheKey(getReq, h.keyHeaders)
