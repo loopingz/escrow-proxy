@@ -335,29 +335,17 @@ func (h *Handler) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *ht
 		}
 	}
 
-	// Invariant: only cache a HEAD that carries a real Content-Length.
+	// Invariant: only cache a HEAD that carries a real Content-Length. Strict
+	// OCI clients (go-containerregistry) treat a missing length (-1) as fatal
+	// with no retry, so a single header-less HEAD fails an image push. If
+	// resolveHeadSize can't determine it, serve as-is and skip caching --
+	// that way a stored HEAD is always valid, with no cleanup path needed.
 	//
-	// Strict OCI clients (go-containerregistry) treat a missing length (-1)
-	// as fatal and do not retry, so relaying one header-less HEAD is enough
-	// to fail an image push. A HEAD has no body of its own to measure, so
-	// when the length is absent (or a bogus 0) we look it up from the
-	// representation via resolveHeadSize.
-	//
-	// If it cannot be resolved, serve the response as-is but do not cache it.
-	// That keeps the invariant true with no cleanup path: a stored HEAD always
-	// has a valid length, so there is never a bad entry to detect later.
-	//
-	// Setting the header here is necessary but not sufficient: goproxy's MITM
-	// writer (https.go) compares resp.Body against the pointer it captured
-	// before calling this handler, and if they differ it deletes
-	// Content-Length and forces chunked framing -- regardless of what we just
-	// set. Every branch below that returns a HEAD response therefore leaves
-	// resp.Body exactly as it arrived from upstream (already drained and
-	// closed a few lines up) instead of swapping in a fresh reader over
-	// bodyBytes. A HEAD has no body to hand the client anyway, so nothing is
-	// lost; what's gained is that resp.Body stays the same pointer, goproxy
-	// sees bodyModified=false, and the Content-Length we resolved survives
-	// onto the wire.
+	// A resolved length isn't enough by itself, though: goproxy's MITM writer
+	// deletes Content-Length and forces chunked framing whenever resp.Body's
+	// identity changes across this handler. So below, a HEAD's resp.Body is
+	// never reassigned (it has no body to give the client anyway) -- that
+	// keeps goproxy from tripping on it and stripping what we just set.
 	if ctx.Req.Method == http.MethodHead {
 		if cl, cerr := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64); cerr != nil || cl <= 0 {
 			size, ok := h.resolveHeadSize(ctx.Req)
@@ -387,8 +375,7 @@ func (h *Handler) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *ht
 		h.logger.Info("cached", "url", ctx.Req.URL.String(), "key", state.key, "status", resp.StatusCode)
 	}
 
-	// Do not rebuild Body for a HEAD: see the note on goproxy's MITM writer
-	// above (bodyModified would strip the Content-Length we just resolved).
+	// See the goproxy note above: a HEAD's Body must stay unreassigned.
 	if ctx.Req.Method != http.MethodHead {
 		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
@@ -451,39 +438,24 @@ func buildResponse(req *http.Request, meta *cache.EntryMeta, body []byte) *http.
 	}
 }
 
-// maxResolveBytes caps how much of the fallback GET body resolveHeadSize will
-// buffer in memory.
-//
-// What we resolve here is a *manifest*, not the image payload. The HEADs that
-// reach this path are OCI manifest existence/size checks (go-containerregistry's
-// headManifest). A manifest is the image's small JSON table of contents: it
-// lists the config and layer blobs by digest and size, but is not itself the
-// bytes of the image, so it is a few KB. The large payload -- the config and
-// layer blobs, MBs to hundreds of MBs -- lives at separate /blobs/ URLs and is
-// never fetched here.
-//
-// So 4 MiB never truncates a real manifest; the cap only guards the case where
-// this GET unexpectedly lands on a large body (a blob) or a pathological
-// response. A body over the cap is not partially counted: resolveHeadSize
-// returns ok=false rather than report a truncated length, so we never pull a
-// large payload just to answer a HEAD.
+// maxResolveBytes caps how much of the fallback GET body resolveHeadSize
+// buffers in memory. This path resolves a *manifest* (the image's small JSON
+// table of contents, a few KB) -- not the payload, which lives at separate
+// /blobs/ URLs and is never fetched here. So 4 MiB never truncates a real
+// manifest; it only guards a body landing here unexpectedly (a blob) or a
+// pathological response. Over the cap, resolveHeadSize returns ok=false
+// rather than report a truncated length.
 const maxResolveBytes = 4 << 20 // 4 MiB
 
-// resolveHeadSize finds the Content-Length a HEAD should advertise when the
-// upstream HEAD arrived without a usable one. The correct value is the octet
-// length a GET for the same URL would return (RFC 9110 §8.6), obtained two
-// ways, cheapest first:
+// resolveHeadSize finds the Content-Length a HEAD should advertise (the octet
+// length a GET for the same URL returns, RFC 9110 §8.6), cheapest first:
+//  1. a sibling GET already in the cache with a positive stored length -- no network.
+//  2. one GET to origin, whose counted body length is cached under the GET key
+//     so the client's own GET is a hit and later HEADs take branch 1.
 //
-//  1. Reuse a sibling GET already in the cache: if one exists with a positive
-//     stored Content-Length, return it. No network.
-//  2. Otherwise make one GET to origin, count its body, and return that length.
-//     The body is cached under the GET key, so the client's own GET becomes a
-//     hit and any later HEAD is answered by branch 1.
-//
-// Returns ok=false when the length cannot be trusted: offline or no upstream,
-// GET error or non-200, body over maxResolveBytes, or a by-digest body that
-// fails verification. The caller then serves the HEAD without caching it,
-// rather than advertise a guessed length.
+// Returns ok=false when the length can't be trusted (no upstream, GET error
+// or non-200, body over maxResolveBytes, digest mismatch) rather than
+// advertise a guessed value.
 func (h *Handler) resolveHeadSize(req *http.Request) (int64, bool) {
 	getReq := &http.Request{Method: http.MethodGet, URL: req.URL, Header: req.Header.Clone()}
 	getKey := ComputeCacheKey(getReq, h.keyHeaders)
