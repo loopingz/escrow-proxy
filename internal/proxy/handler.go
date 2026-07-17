@@ -346,13 +346,24 @@ func (h *Handler) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *ht
 	// If it cannot be resolved, serve the response as-is but do not cache it.
 	// That keeps the invariant true with no cleanup path: a stored HEAD always
 	// has a valid length, so there is never a bad entry to detect later.
+	//
+	// Setting the header here is necessary but not sufficient: goproxy's MITM
+	// writer (https.go) compares resp.Body against the pointer it captured
+	// before calling this handler, and if they differ it deletes
+	// Content-Length and forces chunked framing -- regardless of what we just
+	// set. Every branch below that returns a HEAD response therefore leaves
+	// resp.Body exactly as it arrived from upstream (already drained and
+	// closed a few lines up) instead of swapping in a fresh reader over
+	// bodyBytes. A HEAD has no body to hand the client anyway, so nothing is
+	// lost; what's gained is that resp.Body stays the same pointer, goproxy
+	// sees bodyModified=false, and the Content-Length we resolved survives
+	// onto the wire.
 	if ctx.Req.Method == http.MethodHead {
 		if cl, cerr := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64); cerr != nil || cl <= 0 {
 			size, ok := h.resolveHeadSize(ctx.Req)
 			if !ok {
 				h.logger.Debug("HEAD Content-Length unresolved; serving as-is, not caching",
 					"url", ctx.Req.URL.String())
-				resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				h.recordRequest(ctx.Req, resp.StatusCode, cacheOutcome, state.start)
 				return resp
 			}
@@ -376,7 +387,11 @@ func (h *Handler) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *ht
 		h.logger.Info("cached", "url", ctx.Req.URL.String(), "key", state.key, "status", resp.StatusCode)
 	}
 
-	resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	// Do not rebuild Body for a HEAD: see the note on goproxy's MITM writer
+	// above (bodyModified would strip the Content-Length we just resolved).
+	if ctx.Req.Method != http.MethodHead {
+		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	}
 	h.recordRequest(ctx.Req, resp.StatusCode, cacheOutcome, state.start)
 	return resp
 }
