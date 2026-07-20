@@ -20,6 +20,11 @@ import (
 // returned *http.Response never exercises that writer, so it cannot see this
 // class of bug -- these tests exist to close exactly that gap.
 
+// No unit-test equivalent: this is the case a HandleResponse-level test
+// structurally cannot see. The origin already sends a valid Content-Length,
+// so resolveHeadSize never runs -- the only way to lose it is goproxy's own
+// writer clobbering it because HandleResponse rebuilt resp.Body on this cache
+// miss. That's the actual bug this file exists to catch.
 func TestHEAD_ContentLengthSurvivesRealProxyRoundTrip(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "1788")
@@ -46,6 +51,13 @@ func TestHEAD_ContentLengthSurvivesRealProxyRoundTrip(t *testing.T) {
 	}
 }
 
+// Pairs with TestHEAD_ResolvesViaUpstreamGET_WhenServerOmitsLength in
+// handler_test.go: same scenario (origin's HEAD omits Content-Length
+// entirely, forcing resolveHeadSize's fallback GET), checked at the opposite
+// layer. That test asserts what HandleResponse computes and returns; this one
+// asserts what the client actually receives after goproxy's writer runs. If
+// only this one fails, the bug is in delivery (goproxy), not in
+// resolveHeadSize -- which is exactly the split that caught the real bug.
 func TestHEAD_ResolvedContentLengthSurvivesRealProxyRoundTrip(t *testing.T) {
 	manifest := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","x":"padding-to-a-nontrivial-length"}`)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

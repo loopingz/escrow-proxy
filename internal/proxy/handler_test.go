@@ -574,6 +574,10 @@ func TestHEAD_ResolvesContentLengthFromCachedGET(t *testing.T) {
 // Content-Length (the production failure) and a GET that carries the body. With
 // no sibling GET cached, resolveHeadSize must fetch the GET from origin and serve
 // the true length -- never -1. Without the fix, HandleResponse relays the -1.
+//
+// This asserts what HandleResponse computes and returns, not what a client
+// sees on the wire -- see TestHEAD_ResolvedContentLengthSurvivesRealProxyRoundTrip
+// in head_integration_test.go for the delivery-layer half of this check.
 func TestHEAD_ResolvesViaUpstreamGET_WhenServerOmitsLength(t *testing.T) {
 	manifest := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","x":"padding-to-a-nontrivial-length"}`)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
