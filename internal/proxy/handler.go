@@ -410,7 +410,8 @@ func buildResponse(req *http.Request, meta *cache.EntryMeta, body []byte) *http.
 	if req.Method == http.MethodHead {
 		// A HEAD has no body but its Content-Length still advertises the size a
 		// GET would return. Keep that header value; deriving it from len(body)
-		// would report 0, which OCI push tooling rejects.
+		// would report 0 -- a false size, not one go-containerregistry rejects
+		// (its only check is ContentLength == -1), but still not truthful.
 		if cl, err := strconv.ParseInt(header.Get("Content-Length"), 10, 64); err == nil {
 			contentLength = cl
 		} else {
