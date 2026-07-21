@@ -337,26 +337,21 @@ func (h *Handler) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *ht
 
 	// Invariant: only cache a HEAD that carries a real Content-Length. Strict
 	// OCI clients (go-containerregistry) treat a missing length (-1) as fatal
-	// with no retry, so a single header-less HEAD fails an image push. If
-	// resolveHeadSize can't determine it, serve as-is and skip caching --
-	// that way a stored HEAD is always valid, with no cleanup path needed.
+	// with no retry, so a single header-less HEAD fails an image push. If the
+	// upstream HEAD didn't carry one, serve as-is and skip caching -- that way
+	// a stored HEAD is always valid, with no cleanup path needed.
 	//
-	// A resolved length isn't enough by itself, though: goproxy's MITM writer
+	// A usable length isn't enough by itself, though: goproxy's MITM writer
 	// deletes Content-Length and forces chunked framing whenever resp.Body's
 	// identity changes across this handler. So below, a HEAD's resp.Body is
 	// never reassigned (it has no body to give the client anyway) -- that
-	// keeps goproxy from tripping on it and stripping what we just set.
+	// keeps goproxy from tripping on it and stripping what the origin sent.
 	if ctx.Req.Method == http.MethodHead {
 		if cl, cerr := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64); cerr != nil || cl <= 0 {
-			size, ok := h.resolveHeadSize(ctx.Req)
-			if !ok {
-				h.logger.Debug("HEAD Content-Length unresolved; serving as-is, not caching",
-					"url", ctx.Req.URL.String())
-				h.recordRequest(ctx.Req, resp.StatusCode, cacheOutcome, state.start)
-				return resp
-			}
-			resp.ContentLength = size
-			resp.Header.Set("Content-Length", strconv.FormatInt(size, 10))
+			h.logger.Debug("HEAD Content-Length missing; serving as-is, not caching",
+				"url", ctx.Req.URL.String())
+			h.recordRequest(ctx.Req, resp.StatusCode, cacheOutcome, state.start)
+			return resp
 		}
 	}
 
@@ -437,82 +432,4 @@ func buildResponse(req *http.Request, meta *cache.EntryMeta, body []byte) *http.
 		ProtoMajor:    1,
 		ProtoMinor:    1,
 	}
-}
-
-// maxResolveBytes caps how much of the fallback GET body resolveHeadSize
-// buffers in memory. This path resolves a *manifest* (the image's small JSON
-// table of contents, a few KB) -- not the payload, which lives at separate
-// /blobs/ URLs and is never fetched here. So 4 MiB never truncates a real
-// manifest; it only guards a body landing here unexpectedly (a blob) or a
-// pathological response. Over the cap, resolveHeadSize returns ok=false
-// rather than report a truncated length.
-const maxResolveBytes = 4 << 20 // 4 MiB
-
-// resolveHeadSize finds the Content-Length a HEAD should advertise (the octet
-// length a GET for the same URL returns, RFC 9110 §8.6), cheapest first:
-//  1. a sibling GET already in the cache with a positive stored length -- no network.
-//  2. one GET to origin, whose counted body length is cached under the GET key
-//     so the client's own GET is a hit and later HEADs take branch 1.
-//
-// Returns ok=false when the length can't be trusted (no upstream, GET error
-// or non-200, body over maxResolveBytes, digest mismatch) rather than
-// advertise a guessed value.
-func (h *Handler) resolveHeadSize(req *http.Request) (int64, bool) {
-	getReq := &http.Request{Method: http.MethodGet, URL: req.URL, Header: req.Header.Clone()}
-	getKey := ComputeCacheKey(getReq, h.keyHeaders)
-
-	if meta, rc, err := h.cache.Get(req.Context(), getKey); err == nil {
-		rc.Close()
-		if cl, perr := strconv.ParseInt(meta.Header.Get("Content-Length"), 10, 64); perr == nil && cl > 0 {
-			return cl, true
-		}
-	}
-
-	if h.mode == ModeOffline || h.upstream == nil {
-		return 0, false
-	}
-	greq, err := http.NewRequestWithContext(req.Context(), http.MethodGet, req.URL.String(), nil)
-	if err != nil {
-		return 0, false
-	}
-	if a := req.Header.Get("Authorization"); a != "" {
-		greq.Header.Set("Authorization", a)
-	}
-	if a := req.Header.Get("Accept"); a != "" {
-		greq.Header.Set("Accept", a)
-	}
-	resp, err := h.upstream.RoundTrip(greq, nil)
-	if err != nil {
-		return 0, false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return 0, false
-	}
-	// Read one past the cap so we can tell "fit under the cap" from "exceeded it".
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResolveBytes+1))
-	if err != nil {
-		return 0, false
-	}
-	if int64(len(body)) > maxResolveBytes {
-		return 0, false // over the cap: only a truncated read, so don't report a length
-	}
-	if digest := ExtractOCIDigest(getReq.URL.Path); h.verifyDigest && digest != "" && !VerifyDigest(body, digest) {
-		return 0, false // corrupt/mismatched body: don't trust its length or cache it
-	}
-	// Populate the GET entry so the client's own GET is a hit and later HEADs
-	// reuse it via branch 1. Best-effort.
-	meta := &cache.EntryMeta{
-		Method:     http.MethodGet,
-		URL:        getReq.URL.String(),
-		StatusCode: resp.StatusCode,
-		Header:     resp.Header.Clone(),
-		CachedAt:   h.nowTime(),
-	}
-	meta.Header.Set("Content-Length", strconv.Itoa(len(body)))
-	meta.Header.Del("Transfer-Encoding")
-	if err := h.cache.Put(context.Background(), getKey, meta, bytes.NewReader(body)); err != nil {
-		h.logger.Debug("resolveHeadSize: caching GET body failed", "error", err, "url", getReq.URL.String())
-	}
-	return int64(len(body)), true
 }

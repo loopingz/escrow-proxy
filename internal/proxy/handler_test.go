@@ -6,7 +6,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -527,100 +526,33 @@ func TestSetBufferedBody_PinsContentLengthAndDropsChunked(t *testing.T) {
 	}
 }
 
-// A HEAD miss whose upstream response carries no Content-Length must be resolved
-// from a sibling GET cache entry's length and served as a real, positive length
-// (never -1), without an upstream fetch.
-func TestHEAD_ResolvesContentLengthFromCachedGET(t *testing.T) {
+// A HEAD whose upstream response carries no Content-Length is served as-is
+// (never crashes, never asserts a bogus -1 or 0) and is not cached -- so a
+// later request for the same URL is still a cache miss, not a poisoned hit.
+func TestHEAD_MissingContentLength_ServedAsIsNotCached(t *testing.T) {
 	now := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
 	h, c := newRevalidateHandler(t, func() time.Time { return now })
 	u := "https://reg.example/v2/x/manifests/sha256:deadbeef"
 
-	// Seed a GET entry carrying a real Content-Length, as a prior pull would.
-	getReq, _ := http.NewRequest("GET", u, nil)
-	getKey := ComputeCacheKey(getReq, h.keyHeaders)
-	getMeta := &cache.EntryMeta{
-		Method:     "GET",
-		URL:        u,
-		StatusCode: 200,
-		Header:     http.Header{"Content-Length": {"527"}},
-		CachedAt:   now,
-	}
-	if err := c.Put(context.Background(), getKey, getMeta, bytes.NewReader(make([]byte, 527))); err != nil {
-		t.Fatalf("seed GET entry: %v", err)
-	}
-
-	// HEAD misses, then upstream returns a 200 with NO Content-Length.
 	req := mkReq(t, "HEAD", u)
 	ctx := &goproxy.ProxyCtx{Req: req}
 	if _, resp := h.HandleRequest(req, ctx); resp != nil {
 		t.Fatal("HEAD should miss and defer to upstream")
 	}
 	upstream := &http.Response{
-		StatusCode: 200,
-		Header:     http.Header{"Content-Type": {"application/vnd.oci.image.manifest.v1+json"}},
-		Body:       io.NopCloser(bytes.NewReader(nil)),
-		Request:    req,
+		StatusCode:    200,
+		Header:        http.Header{"Content-Type": {"application/vnd.oci.image.manifest.v1+json"}},
+		Body:          io.NopCloser(bytes.NewReader(nil)),
+		ContentLength: -1,
+		Request:       req,
 	}
 	resp := h.HandleResponse(upstream, ctx)
-	if got := resp.Header.Get("Content-Length"); got != "527" {
-		t.Errorf("resolved Content-Length header = %q, want %q", got, "527")
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200 (served as-is, not an error)", resp.StatusCode)
 	}
-	if resp.ContentLength != 527 {
-		t.Errorf("resolved ContentLength field = %d, want 527", resp.ContentLength)
-	}
-}
 
-// End-to-end reproduction: a real upstream that serves a HEAD 200 with NO
-// Content-Length (the production failure) and a GET that carries the body. With
-// no sibling GET cached, resolveHeadSize must fetch the GET from origin and serve
-// the true length -- never -1. Without the fix, HandleResponse relays the -1.
-//
-// This asserts what HandleResponse computes and returns, not what a client
-// sees on the wire -- see TestHEAD_ResolvedContentLengthSurvivesRealProxyRoundTrip
-// in head_integration_test.go for the delivery-layer half of this check.
-func TestHEAD_ResolvesViaUpstreamGET_WhenServerOmitsLength(t *testing.T) {
-	manifest := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","x":"padding-to-a-nontrivial-length"}`)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodHead {
-			// Reproduce the failure: HEAD 200 with NO Content-Length. Hijack and
-			// write raw bytes, since the stdlib server would otherwise infer one.
-			conn, _, err := w.(http.Hijacker).Hijack()
-			if err != nil {
-				return
-			}
-			_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\n" +
-				"Content-Type: application/vnd.oci.image.manifest.v1+json\r\n" +
-				"Docker-Content-Digest: sha256:deadbeef\r\n\r\n"))
-			_ = conn.Close()
-			return
-		}
-		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
-		_, _ = w.Write(manifest) // GET: stdlib sets Content-Length = len(manifest)
-	}))
-	defer srv.Close()
-
-	now := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
-	h, _ := newRevalidateHandler(t, func() time.Time { return now })
-	h.upstream = newRedirectFollower(http.DefaultTransport, metrics.New())
-
-	req := mkReq(t, http.MethodHead, srv.URL+"/v2/x/manifests/sha256:deadbeef")
-	ctx := &goproxy.ProxyCtx{Req: req}
-	if _, resp := h.HandleRequest(req, ctx); resp != nil {
-		t.Fatal("HEAD should miss and defer to upstream")
-	}
-	// Fetch the upstream HEAD exactly as goproxy would, then hand it to the proxy.
-	upResp, err := h.upstream.RoundTrip(req, ctx)
-	if err != nil {
-		t.Fatalf("upstream HEAD: %v", err)
-	}
-	if upResp.ContentLength != -1 {
-		t.Fatalf("precondition: upstream HEAD should carry no Content-Length, got %d", upResp.ContentLength)
-	}
-	resp := h.HandleResponse(upResp, ctx)
-	if resp.ContentLength != int64(len(manifest)) {
-		t.Errorf("resolved ContentLength = %d, want %d", resp.ContentLength, len(manifest))
-	}
-	if got := resp.Header.Get("Content-Length"); got != strconv.Itoa(len(manifest)) {
-		t.Errorf("resolved Content-Length header = %q, want %d", got, len(manifest))
+	key := ComputeCacheKey(req, h.keyHeaders)
+	if _, _, err := c.Get(context.Background(), key); err == nil {
+		t.Error("HEAD with no Content-Length must not be cached")
 	}
 }
