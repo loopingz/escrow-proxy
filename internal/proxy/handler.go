@@ -335,6 +335,26 @@ func (h *Handler) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *ht
 		}
 	}
 
+	// Invariant: only cache a HEAD that carries a real Content-Length. Strict
+	// OCI clients (go-containerregistry) treat a missing length (-1) as fatal
+	// with no retry, so a single header-less HEAD fails an image push. If the
+	// upstream HEAD didn't carry one, serve as-is and skip caching -- that way
+	// a stored HEAD is always valid, with no cleanup path needed.
+	//
+	// A usable length isn't enough by itself, though: goproxy's MITM writer
+	// deletes Content-Length and forces chunked framing whenever resp.Body's
+	// identity changes across this handler. So below, a HEAD's resp.Body is
+	// never reassigned (it has no body to give the client anyway) -- that
+	// keeps goproxy from tripping on it and stripping what the origin sent.
+	if ctx.Req.Method == http.MethodHead {
+		if cl, cerr := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64); cerr != nil || cl <= 0 {
+			h.logger.Debug("HEAD Content-Length missing; serving as-is, not caching",
+				"url", ctx.Req.URL.String())
+			h.recordRequest(ctx.Req, resp.StatusCode, cacheOutcome, state.start)
+			return resp
+		}
+	}
+
 	meta := &cache.EntryMeta{
 		Method:     ctx.Req.Method,
 		URL:        ctx.Req.URL.String(),
@@ -350,7 +370,10 @@ func (h *Handler) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *ht
 		h.logger.Info("cached", "url", ctx.Req.URL.String(), "key", state.key, "status", resp.StatusCode)
 	}
 
-	resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	// See the goproxy note above: a HEAD's Body must stay unreassigned.
+	if ctx.Req.Method != http.MethodHead {
+		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	}
 	h.recordRequest(ctx.Req, resp.StatusCode, cacheOutcome, state.start)
 	return resp
 }
@@ -382,7 +405,8 @@ func buildResponse(req *http.Request, meta *cache.EntryMeta, body []byte) *http.
 	if req.Method == http.MethodHead {
 		// A HEAD has no body but its Content-Length still advertises the size a
 		// GET would return. Keep that header value; deriving it from len(body)
-		// would report 0, which OCI push tooling rejects.
+		// would report 0 -- a false size, not one go-containerregistry rejects
+		// (its only check is ContentLength == -1), but still not truthful.
 		if cl, err := strconv.ParseInt(header.Get("Content-Length"), 10, 64); err == nil {
 			contentLength = cl
 		} else {

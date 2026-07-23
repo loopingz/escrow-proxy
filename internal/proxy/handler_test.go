@@ -525,3 +525,34 @@ func TestSetBufferedBody_PinsContentLengthAndDropsChunked(t *testing.T) {
 			resp.TransferEncoding, resp.Header.Get("Transfer-Encoding"))
 	}
 }
+
+// A HEAD whose upstream response carries no Content-Length is served as-is
+// (never crashes, never asserts a bogus -1 or 0) and is not cached -- so a
+// later request for the same URL is still a cache miss, not a poisoned hit.
+func TestHEAD_MissingContentLength_ServedAsIsNotCached(t *testing.T) {
+	now := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
+	h, c := newRevalidateHandler(t, func() time.Time { return now })
+	u := "https://reg.example/v2/x/manifests/sha256:deadbeef"
+
+	req := mkReq(t, "HEAD", u)
+	ctx := &goproxy.ProxyCtx{Req: req}
+	if _, resp := h.HandleRequest(req, ctx); resp != nil {
+		t.Fatal("HEAD should miss and defer to upstream")
+	}
+	upstream := &http.Response{
+		StatusCode:    200,
+		Header:        http.Header{"Content-Type": {"application/vnd.oci.image.manifest.v1+json"}},
+		Body:          io.NopCloser(bytes.NewReader(nil)),
+		ContentLength: -1,
+		Request:       req,
+	}
+	resp := h.HandleResponse(upstream, ctx)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200 (served as-is, not an error)", resp.StatusCode)
+	}
+
+	key := ComputeCacheKey(req, h.keyHeaders)
+	if _, _, err := c.Get(context.Background(), key); err == nil {
+		t.Error("HEAD with no Content-Length must not be cached")
+	}
+}
