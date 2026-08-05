@@ -268,6 +268,47 @@ func (h *Handler) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *ht
 		resp.Header.Del(upstreamErrorHeader)
 	}
 
+	// Debug-log the full framing when a 2xx we may serve/cache has an absent or
+	// non-positive Content-Length. go-containerregistry's headManifest treats a
+	// missing length (ContentLength == -1) as fatal and does not retry, so a
+	// single such response fails an image push; capturing protocol, encoding,
+	// redirect chain, and backend fingerprints makes the cause (HTTP/2 omission,
+	// chunked transfer, transparent gzip, or a redirect to a storage backend)
+	// diagnosable in production without a local repro.
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if cl, perr := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64); perr != nil || cl <= 0 {
+			finalHost := ""
+			redirected := false
+			if resp.Request != nil && resp.Request.URL != nil {
+				redirected = resp.Request.URL.String() != ctx.Req.URL.String()
+				if redirected {
+					// Host only. A redirect target is frequently a signed
+					// storage/CDN URL whose query string carries short-lived
+					// credentials; never log the full URL. The host alone answers
+					// "did it redirect to a storage backend" without leaking them.
+					finalHost = resp.Request.URL.Host
+				}
+			}
+			h.logger.Debug("upstream 2xx missing usable Content-Length",
+				"method", ctx.Req.Method,
+				"url", ctx.Req.URL.String(),
+				"status", resp.StatusCode,
+				"proto", resp.Proto,
+				// request-arrival-to-response; dominated by the upstream fetch, so
+				// a high value correlates the omission with a slow/stressed hop.
+				"fetch_ms", time.Since(state.start).Milliseconds(),
+				"cl_header", resp.Header.Get("Content-Length"),
+				"cl_field", resp.ContentLength,
+				"content_encoding", resp.Header.Get("Content-Encoding"),
+				"transfer_encoding", resp.TransferEncoding,
+				"uncompressed", resp.Uncompressed,
+				"redirected", redirected,
+				"final_host", finalHost,
+				"server", resp.Header.Get("Server"),
+				"via", resp.Header.Get("Via"))
+		}
+	}
+
 	cacheOutcome := metrics.CacheMiss
 	if h.mode == ModeRecord {
 		cacheOutcome = metrics.CacheRecorded
@@ -367,7 +408,13 @@ func (h *Handler) HandleResponse(resp *http.Response, ctx *goproxy.ProxyCtx) *ht
 	if err := h.cache.Put(bgCtx, state.key, meta, bytes.NewReader(bodyBytes)); err != nil {
 		h.logger.Warn("failed to cache response", "error", err, "url", ctx.Req.URL.String())
 	} else {
-		h.logger.Info("cached", "url", ctx.Req.URL.String(), "key", state.key, "status", resp.StatusCode)
+		h.logger.Info("cached", "url", ctx.Req.URL.String(), "key", state.key,
+			"status", resp.StatusCode,
+			"content_length", resp.ContentLength, // upstream-advertised length (-1 == none)
+			"body_bytes", len(bodyBytes), // actual buffered body size (0 for HEAD)
+			"content_encoding", resp.Header.Get("Content-Encoding"),
+			"transfer_encoding", resp.TransferEncoding,
+			"proto", resp.Proto)
 	}
 
 	// See the goproxy note above: a HEAD's Body must stay unreassigned.
